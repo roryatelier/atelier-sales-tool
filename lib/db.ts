@@ -1,6 +1,11 @@
 export const isVercel = !!process.env.POSTGRES_URL
 
+function assertDatabaseConfiguration() {
+  if (process.env.VERCEL && !isVercel) throw new Error('Production database configuration unavailable')
+}
+
 export async function initialiseDb() {
+  assertDatabaseConfiguration()
   if (isVercel) {
     const { sql } = await import('@vercel/postgres')
     await sql`CREATE TABLE IF NOT EXISTS dossiers (id SERIAL PRIMARY KEY, brand_name TEXT NOT NULL, brand_name_normalised TEXT NOT NULL UNIQUE, dossier_json TEXT NOT NULL, created_at TIMESTAMP DEFAULT NOW(), updated_at TIMESTAMP DEFAULT NOW())`
@@ -34,6 +39,7 @@ export async function initialiseDb() {
 }
 
 export function getLocalDb() {
+  assertDatabaseConfiguration()
   const Database = require('better-sqlite3')
   const path = require('path')
   return new Database(path.join(process.cwd(), 'atelier.db'))

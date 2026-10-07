@@ -1,5 +1,7 @@
 'use client'
 
+import { userStorage } from '@/lib/browser-storage'
+
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 
@@ -47,7 +49,7 @@ export default function PipelinePage() {
       })
       const data = await res.json()
       if (data.success) {
-        localStorage.setItem('current_dossier', JSON.stringify(data.dossier))
+        userStorage.setItem('current_dossier', JSON.stringify(data.dossier))
         router.push('/dossier')
       }
     } catch {
@@ -310,7 +312,7 @@ export default function PipelinePage() {
                   key={i}
                   className="clickable"
                   onClick={() => {
-                    localStorage.setItem('pipeline_lead', JSON.stringify(lead))
+                    userStorage.setItem('pipeline_lead', JSON.stringify(lead))
                     router.push('/')
                   }}
                 >
@@ -404,8 +406,8 @@ export default function PipelinePage() {
                               })
                               const data = await res.json()
                               if (data.success) {
-                                localStorage.setItem('current_dossier', JSON.stringify(data.dossier))
-                                localStorage.setItem('follow_up_context', JSON.stringify({
+                                userStorage.setItem('current_dossier', JSON.stringify(data.dossier))
+                                userStorage.setItem('follow_up_context', JSON.stringify({
                                   original_subject: lead.email_subject,
                                   contact_name: lead.contact_name,
                                   date_sent: lead.date_added

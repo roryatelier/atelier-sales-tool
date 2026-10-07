@@ -1,3 +1,5 @@
+import { logSafeError } from '@/lib/safe-log'
+import { authorizeRequest } from '@/lib/api-auth'
 import { NextRequest, NextResponse } from 'next/server'
 import Anthropic from '@anthropic-ai/sdk'
 
@@ -164,6 +166,9 @@ async function generateOnce(prompt: string, dossier: Record<string, unknown>): P
 }
 
 export async function POST(request: NextRequest) {
+  const auth = await authorizeRequest(request)
+  if (auth.error) return auth.error
+
   try {
     const body = await request.json()
 
@@ -230,7 +235,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ success: true, email: result.email })
 
   } catch (error) {
-    console.error('Email route error:', error)
+    logSafeError('Email route error:', error)
     return NextResponse.json(
       { error: 'Email generation failed' },
       { status: 500 }

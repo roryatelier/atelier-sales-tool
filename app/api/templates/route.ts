@@ -1,7 +1,12 @@
+import { logSafeError } from '@/lib/safe-log'
+import { authorizeRequest } from '@/lib/api-auth'
 import { NextRequest, NextResponse } from 'next/server'
 import { initialiseDb, isVercel, getLocalDb } from '@/lib/db'
 
-export async function GET() {
+export async function GET(request: Request) {
+  const auth = await authorizeRequest(request)
+  if (auth.error) return auth.error
+
   try {
     await initialiseDb()
     if (isVercel) {
@@ -14,12 +19,15 @@ export async function GET() {
       return NextResponse.json({ success: true, templates })
     }
   } catch (error) {
-    console.error('Templates fetch error:', error)
+    logSafeError('Templates fetch error:', error)
     return NextResponse.json({ error: 'Failed to fetch templates' }, { status: 500 })
   }
 }
 
 export async function POST(request: NextRequest) {
+  const auth = await authorizeRequest(request)
+  if (auth.error) return auth.error
+
   try {
     await initialiseDb()
     const body = await request.json()
@@ -37,12 +45,15 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ success: true, id: result.lastInsertRowid })
     }
   } catch (error) {
-    console.error('Template save error:', error)
+    logSafeError('Template save error:', error)
     return NextResponse.json({ error: 'Failed to save template' }, { status: 500 })
   }
 }
 
 export async function PUT(request: NextRequest) {
+  const auth = await authorizeRequest(request)
+  if (auth.error) return auth.error
+
   try {
     await initialiseDb()
     const body = await request.json()
@@ -59,12 +70,15 @@ export async function PUT(request: NextRequest) {
     }
     return NextResponse.json({ success: true })
   } catch (error) {
-    console.error('Template update error:', error)
+    logSafeError('Template update error:', error)
     return NextResponse.json({ error: 'Failed to update template' }, { status: 500 })
   }
 }
 
 export async function DELETE(request: NextRequest) {
+  const auth = await authorizeRequest(request)
+  if (auth.error) return auth.error
+
   try {
     const { searchParams } = new URL(request.url)
     const id = searchParams.get('id')
@@ -78,7 +92,7 @@ export async function DELETE(request: NextRequest) {
     }
     return NextResponse.json({ success: true })
   } catch (error) {
-    console.error('Template delete error:', error)
+    logSafeError('Template delete error:', error)
     return NextResponse.json({ error: 'Failed to delete template' }, { status: 500 })
   }
 }

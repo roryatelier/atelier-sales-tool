@@ -1,3 +1,5 @@
+import { logSafeError } from '@/lib/safe-log'
+import { authorizeRequest } from '@/lib/api-auth'
 import { NextRequest, NextResponse } from 'next/server'
 
 const ALL_ROLES: Record<string, string> = {
@@ -88,6 +90,9 @@ function selectRoles(signals: { type: string; description: string }[], retailers
 }
 
 export async function POST(request: NextRequest) {
+  const auth = await authorizeRequest(request)
+  if (auth.error) return auth.error
+
   try {
     const body = await request.json()
     const { dossier } = body
@@ -150,7 +155,7 @@ Return exactly 3 bullet points. Each bullet should be one specific, concrete tal
     return NextResponse.json({ success: true, pitchAngles, roles, recommended })
 
   } catch (error) {
-    console.error('Pitch angle error:', error)
+    logSafeError('Pitch angle error:', error)
     return NextResponse.json({ error: 'Failed to generate pitch angles' }, { status: 500 })
   }
 }

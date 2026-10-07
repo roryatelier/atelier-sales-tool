@@ -1,5 +1,7 @@
 'use client'
 
+import { userStorage } from '@/lib/browser-storage'
+
 import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
 
@@ -18,7 +20,7 @@ const CACHE_TTL = 24 * 60 * 60 * 1000
 
 function readCache<T>(key: string): T | null {
   try {
-    const raw = localStorage.getItem(key)
+    const raw = userStorage.getItem(key)
     if (!raw) return null
     const { data, timestamp } = JSON.parse(raw) as { data: T; timestamp: number }
     if (Date.now() - timestamp > CACHE_TTL) return null
@@ -30,7 +32,7 @@ function readCache<T>(key: string): T | null {
 
 function writeCache(key: string, data: unknown): void {
   try {
-    localStorage.setItem(key, JSON.stringify({ data, timestamp: Date.now() }))
+    userStorage.setItem(key, JSON.stringify({ data, timestamp: Date.now() }))
   } catch {}
 }
 
@@ -123,6 +125,7 @@ export default function Dashboard() {
   const [activityItems, setActivityItems] = useState<ActivityItem[]>([])
   const [loadingActivity, setLoadingActivity] = useState(false)
   const [scheduledEmails, setScheduledEmails] = useState<{id: number; to_email: string; subject: string; brand_name: string; contact_name: string; scheduled_at: string; timezone?: string}[]>([])
+  const [scheduledSendingPaused, setScheduledSendingPaused] = useState(false)
   const [timeFilter, setTimeFilter] = useState<TimeFilter>('All Time')
   const [userFilter, setUserFilter] = useState<string>('All')
   const [activityExpanded, setActivityExpanded] = useState(true)
@@ -149,7 +152,10 @@ export default function Dashboard() {
         const pipelineData = await pipelineRes.json()
         const savedData = await savedRes.json()
         const scheduledData = await scheduledRes.json()
-        if (scheduledData.success) setScheduledEmails(scheduledData.emails ?? [])
+        if (scheduledData.success) {
+          setScheduledEmails(scheduledData.emails ?? [])
+          setScheduledSendingPaused(scheduledData.paused === true)
+        }
         if (pipelineData.success) {
           setLeads(pipelineData.leads)
           if (pipelineData.leads.length === 0) setShowOnboarding(true)
@@ -204,7 +210,10 @@ export default function Dashboard() {
         ])
         const pipelineData = await pipelineRes.json()
         const scheduledData = await scheduledRes.json()
-        if (scheduledData.success) setScheduledEmails(scheduledData.emails ?? [])
+        if (scheduledData.success) {
+          setScheduledEmails(scheduledData.emails ?? [])
+          setScheduledSendingPaused(scheduledData.paused === true)
+        }
         if (pipelineData.success) setLeads(pipelineData.leads)
       } catch {}
     }
@@ -216,7 +225,7 @@ export default function Dashboard() {
   }, [])
 
   useEffect(() => {
-    const history = JSON.parse(localStorage.getItem('search_history') ?? '[]') as string[]
+    const history = JSON.parse(userStorage.getItem('search_history') ?? '[]') as string[]
     setSearchHistory(history)
   }, [])
 
@@ -362,10 +371,10 @@ export default function Dashboard() {
         setLoading(false)
         return
       }
-      localStorage.setItem('current_dossier', JSON.stringify(data.dossier))
-      const history = JSON.parse(localStorage.getItem('search_history') ?? '[]') as string[]
+      userStorage.setItem('current_dossier', JSON.stringify(data.dossier))
+      const history = JSON.parse(userStorage.getItem('search_history') ?? '[]') as string[]
       const updated = [target, ...history.filter(h => h !== target)].slice(0, 5)
-      localStorage.setItem('search_history', JSON.stringify(updated))
+      userStorage.setItem('search_history', JSON.stringify(updated))
       setSearchHistory(updated)
       router.push('/dossier')
     } catch {
@@ -385,8 +394,8 @@ export default function Dashboard() {
       })
       const data = await res.json()
       if (!data.dossier) throw new Error('No dossier')
-      localStorage.setItem('current_dossier', JSON.stringify(data.dossier))
-      localStorage.setItem('pitch_bullet', outreachAngle)
+      userStorage.setItem('current_dossier', JSON.stringify(data.dossier))
+      userStorage.setItem('pitch_bullet', outreachAngle)
       router.push('/email')
     } catch {
       setDraftingBrand(null)
@@ -394,10 +403,10 @@ export default function Dashboard() {
   }
 
   async function handleLeadClick(lead: Lead) {
-    localStorage.removeItem('selected_contact')
-    localStorage.removeItem('email_template')
-    localStorage.removeItem('lead_source')
-    const cached = localStorage.getItem('current_dossier')
+    userStorage.removeItem('selected_contact')
+    userStorage.removeItem('email_template')
+    userStorage.removeItem('lead_source')
+    const cached = userStorage.getItem('current_dossier')
     if (cached) {
       const d = JSON.parse(cached)
       if (d.brand_name?.toLowerCase() === lead.brand_name?.toLowerCase()) {
@@ -415,7 +424,7 @@ export default function Dashboard() {
       })
       const data = await res.json()
       if (data.success) {
-        localStorage.setItem('current_dossier', JSON.stringify(data.dossier))
+        userStorage.setItem('current_dossier', JSON.stringify(data.dossier))
         router.push('/dossier')
       }
     } catch {
@@ -429,7 +438,7 @@ export default function Dashboard() {
     const timings: Record<string, {urgency: string; urgency_reason: string; recommended_day: string; signal_context: string | null}> = {}
     await Promise.all(overdue.map(async lead => {
       try {
-        const cached = localStorage.getItem('current_dossier')
+        const cached = userStorage.getItem('current_dossier')
         let dossier = null
         if (cached) {
           const d = JSON.parse(cached)
@@ -555,7 +564,7 @@ export default function Dashboard() {
       })
       const data = await res.json()
       if (data.success) {
-        localStorage.setItem('current_dossier', JSON.stringify(data.dossier))
+        userStorage.setItem('current_dossier', JSON.stringify(data.dossier))
         router.push('/dossier')
       }
     } catch {
@@ -792,10 +801,10 @@ export default function Dashboard() {
                           const res = await fetch('/api/research', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ brand_name: lead.brand_name }) })
                           const data = await res.json()
                           if (data.success) {
-                            localStorage.setItem('current_dossier', JSON.stringify(data.dossier))
-                            localStorage.removeItem('selected_contact')
-                            localStorage.setItem('selected_contact', JSON.stringify({ name: lead.contact_name, role: lead.target_role, email: '' }))
-                            localStorage.setItem('follow_up_context', JSON.stringify({ original_subject: lead.email_subject, contact_name: lead.contact_name, date_sent: lead.date_added }))
+                            userStorage.setItem('current_dossier', JSON.stringify(data.dossier))
+                            userStorage.removeItem('selected_contact')
+                            userStorage.setItem('selected_contact', JSON.stringify({ name: lead.contact_name, role: lead.target_role, email: '' }))
+                            userStorage.setItem('follow_up_context', JSON.stringify({ original_subject: lead.email_subject, contact_name: lead.contact_name, date_sent: lead.date_added }))
                             router.push('/email')
                           }
                         } catch { setLoading(false) }
@@ -819,7 +828,9 @@ export default function Dashboard() {
                 )}
               </div>
               <div className="dash-right-scroll" style={{ maxHeight: 200, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 8 }}>
-                {scheduledEmails.length === 0 ? (
+                {scheduledSendingPaused ? (
+                  <div role="status" style={{ fontSize: 13, padding: '12px 0' }}>Scheduled sending is temporarily paused. Existing jobs are preserved for review.</div>
+                ) : scheduledEmails.length === 0 ? (
                   <div style={{ fontSize: 13, color: 'var(--slate-300)', padding: '12px 0' }}>No scheduled sends</div>
                 ) : scheduledEmails.map(e => (
                   <div key={e.id} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 14px', background: '#f0f0ff', border: '1px solid #d0d0ee', borderRadius: 'var(--radius-md)', flexShrink: 0 }}>

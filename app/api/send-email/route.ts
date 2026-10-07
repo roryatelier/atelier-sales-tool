@@ -1,3 +1,7 @@
+import { getGmailCredentials } from '@/lib/session'
+import { sealGmailCredentials } from '@/lib/auth-policy'
+import { appendPipelineRow } from '@/lib/sheets'
+import { authorizeRequest } from '@/lib/api-auth'
 import { NextRequest, NextResponse } from 'next/server'
 import { google } from 'googleapis'
 
@@ -150,9 +154,17 @@ async function gmailSend(accessToken: string, raw: string): Promise<string> {
 }
 
 export async function POST(request: NextRequest) {
+  const auth = await authorizeRequest(request)
+  if (auth.error) return auth.error
+
   try {
-    let accessToken = request.cookies.get('gmail_access_token')?.value
-    const refreshToken = request.cookies.get('gmail_refresh_token')?.value
+    const body = await request.json()
+    if (body.expectedGoogleSub !== auth.session.googleSub) {
+      return NextResponse.json({ error: 'Your Google account changed. Reload and review the draft before sending.' }, { status: 409 })
+    }
+    const credentials = await getGmailCredentials(auth.session)
+    let accessToken = credentials?.accessToken
+    const refreshToken = credentials?.refreshToken
 
     if (!accessToken && !refreshToken) {
       return NextResponse.json(
@@ -161,8 +173,7 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    const body = await request.json()
-    const { to, cc, bcc, subject, emailBody, contactName, leadSource, senderName, attachments } = body
+    const { to, cc, bcc, subject, emailBody, contactName, leadSource, attachments } = body
 
     if (!to || !subject || !emailBody) {
       return NextResponse.json(
@@ -171,6 +182,22 @@ export async function POST(request: NextRequest) {
       )
     }
 
+    if (typeof subject !== 'string' || typeof emailBody !== 'string' ||
+      (attachments !== undefined && (!Array.isArray(attachments) || attachments.some(att => !att || typeof att.name !== 'string' || typeof att.data !== 'string' || typeof att.type !== 'string')))) {
+      return NextResponse.json({ error: 'Invalid message fields' }, { status: 400 })
+    }
+    if ([to, cc, bcc].some(value => value !== undefined && (typeof value !== 'string' || /[\r\n]/.test(value))) ||
+      (Array.isArray(attachments) && attachments.some(att => typeof att.type !== 'string' || /[\r\n]/.test(att.type)))) {
+      return NextResponse.json({ error: 'Invalid message headers' }, { status: 400 })
+    }
+    if (Buffer.byteLength(JSON.stringify(body), 'utf8') > 4 * 1024 * 1024) {
+      return NextResponse.json({ error: 'Message and attachments exceed the upload limit' }, { status: 413 })
+    }
+    const recipients = [to, cc, bcc].filter(Boolean).flatMap(value => value.split(',').map((address: string) => address.trim()).filter(Boolean))
+    if (!to.split(',').some((address: string) => address.trim()) || recipients.length > 20 || recipients.some(address => !/^[^\s<>@]+@[^\s<>@]+\.[^\s<>@]+$/.test(address)) ||
+      (attachments ?? []).some((att: { type: string; data: string }) => !/^[a-zA-Z0-9!#$&^_.+-]+\/[a-zA-Z0-9!#$&^_.+-]+$/.test(att.type) || !/^[A-Za-z0-9+/]*={0,2}$/.test(att.data) || att.data.length % 4 !== 0)) {
+      return NextResponse.json({ error: 'Invalid recipients or attachment format' }, { status: 400 })
+    }
     const raw = makeEmailBody(to, subject, emailBody, attachments, cc, bcc)
     let newAccessToken: string | null = null
 
@@ -208,10 +235,7 @@ export async function POST(request: NextRequest) {
     const dossier = body.dossier
     if (dossier) {
       try {
-        await fetch(`${request.nextUrl.origin}/api/save-to-sheets`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
+        await appendPipelineRow({
             brand_name: dossier.brand_name,
             website: dossier.website,
             lead_source: leadSource ?? 'Outbound',
@@ -226,11 +250,10 @@ export async function POST(request: NextRequest) {
             email_subject: subject,
             email_body: emailBody,
             status: 'Sent',
-            sent_by: senderName ?? ''
-          })
+            sent_by: auth.session.email
         })
-      } catch (e) {
-        console.error('Sheets sync failed:', e)
+      } catch {
+        console.error('Sheets sync failed')
       }
     }
 
@@ -246,8 +269,8 @@ export async function POST(request: NextRequest) {
         const db = getLocalDb()
         db.prepare('INSERT INTO contact_history (brand_name, contact_role, contact_name, contact_email, method) VALUES (?, ?, ?, ?, ?)').run(dossier?.brand_name ?? '', body.role ?? '', contactName, to, 'email')
       }
-    } catch (e) {
-      console.error('Failed to log contact history:', e)
+    } catch {
+      console.error('Failed to log contact history')
     }
 
     const response = NextResponse.json({
@@ -259,11 +282,11 @@ export async function POST(request: NextRequest) {
 
     // Persist the refreshed token so subsequent requests don't need to refresh again
     if (newAccessToken) {
-      response.cookies.set('gmail_access_token', newAccessToken, {
+      response.cookies.set('atelier_gmail', await sealGmailCredentials({ ...credentials!, accessToken: newAccessToken }), {
         httpOnly: true,
-        secure: !!process.env.PRODUCTION_URL,
+        secure: process.env.NODE_ENV === 'production',
         sameSite: 'lax',
-        maxAge: 3600,
+        maxAge: 60 * 60 * 24 * 30,
         path: '/',
       })
     }
@@ -271,7 +294,7 @@ export async function POST(request: NextRequest) {
     return response
 
   } catch (error: unknown) {
-    console.error('Send email error:', error)
+    console.error('Send email failed')
 
     if (isAuthError(error)) {
       return NextResponse.json(

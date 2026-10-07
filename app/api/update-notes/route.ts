@@ -1,9 +1,14 @@
+import { logSafeError } from '@/lib/safe-log'
+import { authorizeRequest } from '@/lib/api-auth'
 import { NextRequest, NextResponse } from 'next/server'
 import { google } from 'googleapis'
 
 const SPREADSHEET_ID = process.env.GOOGLE_SHEETS_ID
 
 export async function POST(request: NextRequest) {
+  const auth = await authorizeRequest(request)
+  if (auth.error) return auth.error
+
   try {
     const body = await request.json()
     const { brand_name, notes } = body
@@ -38,7 +43,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({ success: true })
   } catch (error) {
-    console.error('Update notes error:', error)
+    logSafeError('Update notes error:', error)
     return NextResponse.json({ error: 'Failed to update notes' }, { status: 500 })
   }
 }

@@ -39,3 +39,7 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# Secrets and local runtime data must never be committed.
+service-account*.json
+atelier.db*

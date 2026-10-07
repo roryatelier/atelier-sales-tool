@@ -1,5 +1,7 @@
 'use client'
 
+import { userStorage, activeStorageOwner, matchesDraftIdentity } from '@/lib/browser-storage'
+
 import React, { useEffect, useLayoutEffect, useState, useRef } from 'react'
 import { useRouter } from 'next/navigation'
 
@@ -83,6 +85,7 @@ export default function EmailPage() {
   const [contactHistory, setContactHistory] = useState<{contact_role: string; sent_at: string}[]>([])
   const [userName, setUserName] = useState('')
   const [userEmail, setUserEmail] = useState('')
+  const [userGoogleSub, setUserGoogleSub] = useState('')
   const [ccEmail, setCcEmail] = useState('')
   const [bccEmail, setBccEmail] = useState('')
   const [toEmail, setToEmail] = useState('')
@@ -262,21 +265,26 @@ export default function EmailPage() {
   }
 
   useEffect(() => {
-    const storedDossier = localStorage.getItem('current_dossier')
-    const storedContact = localStorage.getItem('selected_contact')
-    const storedTemplate = localStorage.getItem('email_template')
+    const draftOwner = activeStorageOwner()
+    const storedDossier = userStorage.getItem('current_dossier')
+    const storedContact = userStorage.getItem('selected_contact')
+    const storedTemplate = userStorage.getItem('email_template')
     if (!storedDossier) { setChecked(true); return }
     const parsedDossier: Dossier = JSON.parse(storedDossier)
     document.title = `Email — ${parsedDossier.brand_name} — Atelier`
 
     fetch('/api/me').then(r => r.json()).then(data => {
-      if (data.user) {
+      if (data.user && matchesDraftIdentity(draftOwner, data.user.google_sub)) {
         setUserName(data.user.name)
         setUserEmail(data.user.email)
-        localStorage.setItem('atelier_user_name', data.user.name)
+        setUserGoogleSub(draftOwner!)
+        userStorage.setItem('atelier_user_name', data.user.name)
+      } else {
+        setUserGoogleSub('')
+        setError('Account changed. Reload before continuing with this draft.')
       }
-    })
-    const lastContacted = localStorage.getItem('last_contacted_date') ?? undefined
+    }).catch(() => { setUserGoogleSub(''); setError('Unable to verify the draft owner. Reload before sending.') })
+    const lastContacted = userStorage.getItem('last_contacted_date') ?? undefined
     fetch('/api/outreach-timing', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -288,7 +296,7 @@ export default function EmailPage() {
     // Try to restore persisted tabs for the same brand
     let didRestore = false
     try {
-      const storedEmailTabs = localStorage.getItem('email_tabs')
+      const storedEmailTabs = userStorage.getItem('email_tabs')
       if (storedEmailTabs) {
         const persisted = JSON.parse(storedEmailTabs)
         if (
@@ -333,9 +341,9 @@ export default function EmailPage() {
 
     if (storedTemplate) {
       setActiveTemplate(JSON.parse(storedTemplate))
-      localStorage.removeItem('email_template')
+      userStorage.removeItem('email_template')
     }
-    const followUpContextRaw = localStorage.getItem('follow_up_context')
+    const followUpContextRaw = userStorage.getItem('follow_up_context')
     console.log('[follow-up] localStorage follow_up_context at load:', followUpContextRaw)
     if (followUpContextRaw) {
       const parsed = JSON.parse(followUpContextRaw)
@@ -343,10 +351,10 @@ export default function EmailPage() {
       setFollowUpContext(parsed)
       // Keep in localStorage — used as fallback at send time in case tab switching clears state
     }
-    const pitchBullet = localStorage.getItem('pitch_bullet')
+    const pitchBullet = userStorage.getItem('pitch_bullet')
     if (pitchBullet) {
       setSelectedBullet(pitchBullet)
-      localStorage.removeItem('pitch_bullet')
+      userStorage.removeItem('pitch_bullet')
     }
 
     setChecked(true)
@@ -392,7 +400,7 @@ export default function EmailPage() {
       .map(id => tabDataRef.current.get(id))
       .filter((s): s is TabSnapshot => s != null)
     try {
-      localStorage.setItem('email_tabs', JSON.stringify({
+      userStorage.setItem('email_tabs', JSON.stringify({
         brandName: dossier.brand_name as string,
         activeTabId: activeTabIdRef.current,
         tabs: allSnaps,
@@ -514,7 +522,7 @@ export default function EmailPage() {
           template: template ?? activeTemplate ?? undefined,
           pitch_bullet: bullet ?? selectedBullet ?? undefined,
           follow_up: followUpContext ?? undefined,
-          sender_name: localStorage.getItem('atelier_user_name') ?? ''
+          sender_name: userStorage.getItem('atelier_user_name') ?? ''
         })
       })
 
@@ -600,7 +608,7 @@ export default function EmailPage() {
           body: JSON.stringify({
             brand_name: dossier.brand_name,
             website: (dossier as Record<string, unknown>).website ?? '',
-            lead_source: localStorage.getItem('lead_source') ?? 'Outbound',
+            lead_source: userStorage.getItem('lead_source') ?? 'Outbound',
             revenue_estimate: (dossier as Record<string, unknown>).revenue_estimate ?? '',
             retailers: (dossier as Record<string, unknown>).retailers ?? [],
             category: (dossier as Record<string, unknown>).category ?? '',
@@ -761,7 +769,7 @@ export default function EmailPage() {
           contact_name: contact?.name ?? '',
           scheduled_at_local: scheduledAt,
           timezone: scheduleTimezone,
-          sent_by: localStorage.getItem('atelier_user_name') ?? '',
+          sent_by: userStorage.getItem('atelier_user_name') ?? '',
           dossier: dossier ?? undefined,
         }),
       })
@@ -799,6 +807,10 @@ export default function EmailPage() {
 
   async function handleSend() {
     if (!email) return
+    if (!matchesDraftIdentity(userGoogleSub, userGoogleSub)) {
+      setError('Account changed. Reload before sending this draft.')
+      return
+    }
     setSending(true)
     setError('')
 
@@ -812,10 +824,11 @@ export default function EmailPage() {
           bcc: bccEmail,
           subject: email.subject,
           emailBody: email.body,
+          expectedGoogleSub: userGoogleSub,
           contactName: contact?.name ?? '',
           role: selectedRole,
-          leadSource: localStorage.getItem('lead_source') ?? 'Outbound',
-          senderName: localStorage.getItem('atelier_user_name') ?? '',
+          leadSource: userStorage.getItem('lead_source') ?? 'Outbound',
+          senderName: userStorage.getItem('atelier_user_name') ?? '',
           dossier,
           attachments: attachments.length > 0 ? attachments : undefined
         })
@@ -829,13 +842,13 @@ export default function EmailPage() {
       setSent(true)
       setShowModal(false)
 
-      const lsRaw = localStorage.getItem('follow_up_context')
+      const lsRaw = userStorage.getItem('follow_up_context')
       const effectiveFollowUp = followUpContextRef.current ?? followUpContext ?? (lsRaw ? JSON.parse(lsRaw) : null)
       console.log('[follow-up] at send time — ref:', followUpContextRef.current, 'state:', followUpContext, 'localStorage:', lsRaw, 'effective:', effectiveFollowUp)
 
       if (effectiveFollowUp && dossier) {
         console.log('[follow-up] calling /api/update-pipeline with:', { brand_name: dossier.brand_name, status: 'Follow-up 1' })
-        localStorage.removeItem('follow_up_context')
+        userStorage.removeItem('follow_up_context')
         followUpContextRef.current = null
         fetch('/api/update-pipeline', {
           method: 'POST',
@@ -1589,8 +1602,8 @@ export default function EmailPage() {
           <button onClick={() => setShowModal(true)} className="btn btn-primary" style={{ flex: 1, height: 52, fontSize: 15, boxShadow: '0 4px 24px rgba(0,0,0,0.12)' }}>
             Send email
           </button>
-          <button onClick={openScheduleModal} className="btn btn-secondary" style={{ flex: 1, height: 52, fontSize: 15, boxShadow: '0 4px 24px rgba(0,0,0,0.12)' }}>
-            🕐 Schedule send
+          <button onClick={openScheduleModal} disabled title="Scheduled sending is temporarily paused" className="btn btn-secondary" style={{ flex: 1, height: 52, fontSize: 15, boxShadow: '0 4px 24px rgba(0,0,0,0.12)' }}>
+            🕐 Scheduled sending paused
           </button>
           <button onClick={() => generateEmail(selectedRole)} disabled={loading} className="btn btn-secondary" style={{ flex: 1, height: 52, fontSize: 15, boxShadow: '0 4px 24px rgba(0,0,0,0.12)' }}>
             Regenerate
@@ -1647,7 +1660,7 @@ export default function EmailPage() {
             </div>
             <div className="modal-foot">
               <button onClick={() => setShowModal(false)} className="btn btn-secondary">Cancel</button>
-              <button onClick={handleSend} disabled={sending} className="btn btn-primary">
+              <button onClick={handleSend} disabled={sending || !userGoogleSub} className="btn btn-primary">
                 {sending ? 'Sending...' : 'Confirm send'}
               </button>
             </div>

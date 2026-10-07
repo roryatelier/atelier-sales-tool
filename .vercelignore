@@ -1,0 +1,5 @@
+.git
+.env*
+service-account*.json
+atelier.db*
+tests

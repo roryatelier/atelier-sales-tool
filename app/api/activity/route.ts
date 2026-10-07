@@ -1,3 +1,5 @@
+import { logSafeError } from '@/lib/safe-log'
+import { authorizeRequest } from '@/lib/api-auth'
 import { NextResponse } from 'next/server'
 import { google } from 'googleapis'
 
@@ -24,7 +26,10 @@ function deriveActivity(row: string[]): { verb: string; icon: string } | null {
   }
 }
 
-export async function GET() {
+export async function GET(request: Request) {
+  const auth = await authorizeRequest(request)
+  if (auth.error) return auth.error
+
   try {
     const serviceAccountRaw = process.env.GOOGLE_SERVICE_ACCOUNT
     if (!serviceAccountRaw) {
@@ -67,7 +72,7 @@ export async function GET() {
 
     return NextResponse.json({ success: true, activity })
   } catch (error) {
-    console.error('Activity fetch error:', error)
+    logSafeError('Activity fetch error:', error)
     return NextResponse.json({ success: true, activity: [] })
   }
 }

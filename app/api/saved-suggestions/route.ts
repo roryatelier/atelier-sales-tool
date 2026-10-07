@@ -1,7 +1,12 @@
+import { logSafeError } from '@/lib/safe-log'
+import { authorizeRequest } from '@/lib/api-auth'
 import { NextRequest, NextResponse } from 'next/server'
 import { initialiseDb, isVercel, getLocalDb } from '@/lib/db'
 
-export async function GET() {
+export async function GET(request: Request) {
+  const auth = await authorizeRequest(request)
+  if (auth.error) return auth.error
+
   try {
     await initialiseDb()
     if (isVercel) {
@@ -14,12 +19,15 @@ export async function GET() {
       return NextResponse.json({ success: true, suggestions })
     }
   } catch (error) {
-    console.error('Saved suggestions fetch error:', error)
+    logSafeError('Saved suggestions fetch error:', error)
     return NextResponse.json({ error: 'Failed to fetch saved suggestions' }, { status: 500 })
   }
 }
 
 export async function POST(request: NextRequest) {
+  const auth = await authorizeRequest(request)
+  if (auth.error) return auth.error
+
   try {
     await initialiseDb()
     const body = await request.json()
@@ -36,12 +44,15 @@ export async function POST(request: NextRequest) {
     }
     return NextResponse.json({ success: true })
   } catch (error) {
-    console.error('Save suggestion error:', error)
+    logSafeError('Save suggestion error:', error)
     return NextResponse.json({ error: 'Failed to save suggestion' }, { status: 500 })
   }
 }
 
 export async function DELETE(request: NextRequest) {
+  const auth = await authorizeRequest(request)
+  if (auth.error) return auth.error
+
   try {
     const { searchParams } = new URL(request.url)
     const brand_name = searchParams.get('brand_name')
@@ -55,7 +66,7 @@ export async function DELETE(request: NextRequest) {
     }
     return NextResponse.json({ success: true })
   } catch (error) {
-    console.error('Delete suggestion error:', error)
+    logSafeError('Delete suggestion error:', error)
     return NextResponse.json({ error: 'Failed to delete suggestion' }, { status: 500 })
   }
 }

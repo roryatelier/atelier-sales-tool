@@ -1,6 +1,11 @@
+import { logSafeError } from '@/lib/safe-log'
+import { authorizeRequest } from '@/lib/api-auth'
 import { NextResponse } from 'next/server'
 
-export async function GET() {
+export async function GET(request: Request) {
+  const auth = await authorizeRequest(request)
+  if (auth.error) return auth.error
+
   try {
     const res = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
@@ -61,7 +66,7 @@ Return 4 signals as valid JSON only. No preamble, no markdown fences. Begin with
     return NextResponse.json({ success: true, signals })
 
   } catch (error) {
-    console.error('Market pulse error:', error)
+    logSafeError('Market pulse error:', error)
     return NextResponse.json({ error: 'Failed to fetch market pulse' }, { status: 500 })
   }
 }

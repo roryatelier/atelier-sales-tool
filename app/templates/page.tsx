@@ -1,5 +1,7 @@
 'use client'
 
+import { userStorage } from '@/lib/browser-storage'
+
 import { useEffect, useState } from 'react'
 
 interface Template {
@@ -320,7 +322,7 @@ export default function TemplatesPage() {
                 </div>
                 <button
                   onClick={() => {
-                    localStorage.setItem('email_template', JSON.stringify(selectedTemplate))
+                    userStorage.setItem('email_template', JSON.stringify(selectedTemplate))
                     window.location.href = '/email'
                   }}
                   className="btn btn-primary btn-sm"

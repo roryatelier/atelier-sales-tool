@@ -1,6 +1,11 @@
+import { logSafeError } from '@/lib/safe-log'
+import { authorizeRequest } from '@/lib/api-auth'
 import { NextRequest, NextResponse } from 'next/server'
 
 export async function POST(request: NextRequest) {
+  const auth = await authorizeRequest(request)
+  if (auth.error) return auth.error
+
   try {
     const body = {
       model: 'claude-sonnet-4-6',
@@ -44,7 +49,7 @@ export async function POST(request: NextRequest) {
     console.log('[competitor-signals] Claude API response:', JSON.stringify(data).slice(0, 500))
 
     if (!res.ok) {
-      console.error('[competitor-signals] API error:', data)
+      logSafeError('[competitor-signals] API error:', data)
       return NextResponse.json({ error: 'Claude API error', detail: data }, { status: 500 })
     }
 
@@ -65,7 +70,7 @@ export async function POST(request: NextRequest) {
     try {
       signals = JSON.parse(jsonMatch[0])
     } catch (parseError) {
-      console.error('[competitor-signals] JSON parse error:', parseError)
+      logSafeError('[competitor-signals] JSON parse error:', parseError)
       return NextResponse.json({ success: false, signals: [], rawText, parseError: String(parseError) })
     }
 
@@ -87,7 +92,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ success: true, signals })
 
   } catch (error) {
-    console.error('[competitor-signals] Unexpected error:', error)
+    logSafeError('[competitor-signals] Unexpected error:', error)
     return NextResponse.json({ error: 'Failed to fetch industry signals', detail: String(error) }, { status: 500 })
   }
 }

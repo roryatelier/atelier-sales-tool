@@ -1,5 +1,7 @@
 'use client'
 
+import { userStorage } from '@/lib/browser-storage'
+
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 
@@ -126,12 +128,12 @@ export default function DossierPage() {
   const ui = tabUI[activeTabId] ?? defaultTabUI()
 
   useEffect(() => {
-    const back = localStorage.getItem('dossier_back')
-    if (back) { setBackTo(back); localStorage.removeItem('dossier_back') }
+    const back = userStorage.getItem('dossier_back')
+    if (back) { setBackTo(back); userStorage.removeItem('dossier_back') }
 
-    const stored = localStorage.getItem('dossier_tabs')
-    const storedActive = localStorage.getItem('dossier_active_tab')
-    const newDossierRaw = localStorage.getItem('current_dossier')
+    const stored = userStorage.getItem('dossier_tabs')
+    const storedActive = userStorage.getItem('dossier_active_tab')
+    const newDossierRaw = userStorage.getItem('current_dossier')
 
     let existingTabs: Tab[] = []
     if (stored) {
@@ -139,7 +141,7 @@ export default function DossierPage() {
     }
 
     if (newDossierRaw) {
-      localStorage.removeItem('current_dossier')
+      userStorage.removeItem('current_dossier')
       const newDossier: Dossier = JSON.parse(newDossierRaw)
       const existingTab = existingTabs.find(t =>
         t.dossier.brand_name.toLowerCase() === newDossier.brand_name.toLowerCase()
@@ -149,8 +151,8 @@ export default function DossierPage() {
         const updatedTabs = existingTabs.map(t => t.id === existingTab.id ? { ...t, dossier: newDossier } : t)
         setTabs(updatedTabs)
         setActiveTabId(existingTab.id)
-        localStorage.setItem('dossier_tabs', JSON.stringify(updatedTabs))
-        localStorage.setItem('dossier_active_tab', existingTab.id)
+        userStorage.setItem('dossier_tabs', JSON.stringify(updatedTabs))
+        userStorage.setItem('dossier_active_tab', existingTab.id)
         document.title = `${newDossier.brand_name} — Atelier`
         checkPipelineStatus(newDossier.brand_name, existingTab.id)
         checkIfSaved(newDossier.brand_name, existingTab.id)
@@ -160,12 +162,12 @@ export default function DossierPage() {
         })
       } else {
         const newId = `tab_${Date.now()}`
-        const newTab: Tab = { id: newId, dossier: newDossier, leadSource: localStorage.getItem('lead_source') ?? 'Outbound' }
+        const newTab: Tab = { id: newId, dossier: newDossier, leadSource: userStorage.getItem('lead_source') ?? 'Outbound' }
         const updatedTabs = [...existingTabs, newTab]
         setTabs(updatedTabs)
         setActiveTabId(newId)
-        localStorage.setItem('dossier_tabs', JSON.stringify(updatedTabs))
-        localStorage.setItem('dossier_active_tab', newId)
+        userStorage.setItem('dossier_tabs', JSON.stringify(updatedTabs))
+        userStorage.setItem('dossier_active_tab', newId)
         document.title = `${newDossier.brand_name} — Atelier`
         checkPipelineStatus(newDossier.brand_name, newId)
         checkIfSaved(newDossier.brand_name, newId)
@@ -193,13 +195,13 @@ export default function DossierPage() {
 
   useEffect(() => {
     if (tabs.length > 0) {
-      localStorage.setItem('dossier_tabs', JSON.stringify(tabs))
+      userStorage.setItem('dossier_tabs', JSON.stringify(tabs))
     }
   }, [tabs])
 
   useEffect(() => {
     if (activeTabId) {
-      localStorage.setItem('dossier_active_tab', activeTabId)
+      userStorage.setItem('dossier_active_tab', activeTabId)
     }
   }, [activeTabId])
 
@@ -246,13 +248,13 @@ export default function DossierPage() {
     setTabs(newTabs)
 
     if (newTabs.length === 0) {
-      localStorage.removeItem('dossier_tabs')
-      localStorage.removeItem('dossier_active_tab')
+      userStorage.removeItem('dossier_tabs')
+      userStorage.removeItem('dossier_active_tab')
       router.push('/')
       return
     }
 
-    localStorage.setItem('dossier_tabs', JSON.stringify(newTabs))
+    userStorage.setItem('dossier_tabs', JSON.stringify(newTabs))
     if (tabId === activeTabId) {
       const nextTab = newTabs[Math.max(0, idx - 1)]
       setActiveTabId(nextTab.id)
@@ -267,8 +269,8 @@ export default function DossierPage() {
 
   function handleProceed() {
     if (!dossier) return
-    localStorage.setItem('current_dossier', JSON.stringify(dossier))
-    localStorage.setItem('lead_source', leadSource)
+    userStorage.setItem('current_dossier', JSON.stringify(dossier))
+    userStorage.setItem('lead_source', leadSource)
     router.push('/contacts')
   }
 
@@ -278,7 +280,7 @@ export default function DossierPage() {
 
   function navigateToEmail() {
     if (!dossier) return
-    localStorage.setItem('current_dossier', JSON.stringify(dossier))
+    userStorage.setItem('current_dossier', JSON.stringify(dossier))
     router.push('/email')
   }
 

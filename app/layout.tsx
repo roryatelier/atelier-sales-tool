@@ -2,6 +2,7 @@ import type { Metadata } from 'next'
 import './globals.css'
 import { getSession } from '@/lib/session'
 import NavItems from './components/NavItems'
+import UserStorageBoundary from './components/UserStorageBoundary'
 
 export const metadata: Metadata = {
   title: {
@@ -83,7 +84,7 @@ export default async function RootLayout({
           </aside>
           <main className="main">
             <div className="main-inner">
-              {children}
+              <UserStorageBoundary userId={session?.googleSub ?? ''}>{children}</UserStorageBoundary>
             </div>
           </main>
         </div>

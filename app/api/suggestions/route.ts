@@ -1,3 +1,5 @@
+import { logSafeError } from '@/lib/safe-log'
+import { authorizeRequest } from '@/lib/api-auth'
 import { NextResponse } from 'next/server'
 import Anthropic from '@anthropic-ai/sdk'
 import { initialiseDb, isVercel, getLocalDb } from '@/lib/db'
@@ -7,6 +9,9 @@ const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
 const REENGAGE_MONTHS = 6
 
 export async function POST(request: Request) {
+  const auth = await authorizeRequest(request)
+  if (auth.error) return auth.error
+
   try {
     await initialiseDb()
     const body = await request.json()
@@ -100,7 +105,7 @@ export async function POST(request: Request) {
     })
 
   } catch (error) {
-    console.error('Suggestions error:', error)
+    logSafeError('Suggestions error:', error)
     return NextResponse.json({ error: 'Failed to generate suggestions' }, { status: 500 })
   }
 }

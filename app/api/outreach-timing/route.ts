@@ -1,3 +1,5 @@
+import { logSafeError } from '@/lib/safe-log'
+import { authorizeRequest } from '@/lib/api-auth'
 import { NextRequest, NextResponse } from 'next/server'
 
 function getBestDay(): { day: string; date: string; reason: string } {
@@ -39,6 +41,9 @@ function getDaysSinceContact(lastContacted?: string): number {
 }
 
 export async function POST(request: NextRequest) {
+  const auth = await authorizeRequest(request)
+  if (auth.error) return auth.error
+
   try {
     const body = await request.json()
     const { dossier, last_contacted } = body
@@ -146,7 +151,7 @@ Return a JSON object only. No preamble, no markdown fences:
     })
 
   } catch (error) {
-    console.error('Outreach timing error:', error)
+    logSafeError('Outreach timing error:', error)
     return NextResponse.json({ error: 'Failed to calculate timing' }, { status: 500 })
   }
 }

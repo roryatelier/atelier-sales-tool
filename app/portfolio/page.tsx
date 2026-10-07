@@ -1,5 +1,7 @@
 'use client'
 
+import { userStorage } from '@/lib/browser-storage'
+
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 
@@ -139,8 +141,8 @@ export default function PortfolioPage() {
   }
 
   function openDossier(d: PortfolioDossier) {
-    localStorage.setItem('current_dossier', JSON.stringify(d))
-    localStorage.setItem('dossier_back', 'portfolio')
+    userStorage.setItem('current_dossier', JSON.stringify(d))
+    userStorage.setItem('dossier_back', 'portfolio')
     router.push('/dossier')
   }
 

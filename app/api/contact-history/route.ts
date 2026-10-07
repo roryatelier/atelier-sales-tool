@@ -1,7 +1,12 @@
+import { logSafeError } from '@/lib/safe-log'
+import { authorizeRequest } from '@/lib/api-auth'
 import { NextRequest, NextResponse } from 'next/server'
 import { initialiseDb, isVercel, getLocalDb } from '@/lib/db'
 
 export async function GET(request: NextRequest) {
+  const auth = await authorizeRequest(request)
+  if (auth.error) return auth.error
+
   try {
     await initialiseDb()
     const { searchParams } = new URL(request.url)
@@ -17,12 +22,15 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ success: true, history })
     }
   } catch (error) {
-    console.error('Contact history error:', error)
+    logSafeError('Contact history error:', error)
     return NextResponse.json({ error: 'Failed to fetch contact history' }, { status: 500 })
   }
 }
 
 export async function POST(request: NextRequest) {
+  const auth = await authorizeRequest(request)
+  if (auth.error) return auth.error
+
   try {
     await initialiseDb()
     const body = await request.json()
@@ -36,7 +44,7 @@ export async function POST(request: NextRequest) {
     }
     return NextResponse.json({ success: true })
   } catch (error) {
-    console.error('Contact history POST error:', error)
+    logSafeError('Contact history POST error:', error)
     return NextResponse.json({ error: 'Failed to save contact history' }, { status: 500 })
   }
 }

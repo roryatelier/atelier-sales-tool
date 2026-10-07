@@ -1,3 +1,5 @@
+import { logSafeError } from '@/lib/safe-log'
+import { authorizeRequest } from '@/lib/api-auth'
 import { NextRequest, NextResponse } from 'next/server'
 
 const LUSHA_API_KEY = process.env.LUSHA_API_KEY
@@ -29,7 +31,7 @@ async function fetchCompanyContacts(domain: string): Promise<Record<string, unkn
     })
 
     if (!res.ok) {
-      console.error('Lusha fetch failed:', res.status, await res.text())
+      logSafeError('Lusha fetch failed:', await res.text())
       return []
     }
 
@@ -37,7 +39,7 @@ async function fetchCompanyContacts(domain: string): Promise<Record<string, unkn
     return data.results ?? []
 
   } catch (error) {
-    console.error('Lusha error:', error)
+    logSafeError('Lusha error:', error)
     return []
   }
 }
@@ -62,6 +64,9 @@ function getPlaceholders(companyName: string) {
 }
 
 export async function POST(request: NextRequest) {
+  const auth = await authorizeRequest(request)
+  if (auth.error) return auth.error
+
   try {
     const body = await request.json()
     const { brand_name, domain, enrich_id } = body
@@ -93,10 +98,10 @@ export async function POST(request: NextRequest) {
             return NextResponse.json({ success: true, email, phone })
           }
         } else {
-          console.error('Enrich failed:', enrichRes.status, await enrichRes.text())
+          logSafeError('Enrich failed:', await enrichRes.text())
         }
       } catch (e) {
-        console.error('Enrich error:', e)
+        logSafeError('Enrich error:', e)
       }
       return NextResponse.json({ success: true, email: '', phone: '' })
     }
@@ -145,7 +150,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ success: true, contacts: results })
 
   } catch (error) {
-    console.error('Lookup contacts error:', error)
+    logSafeError('Lookup contacts error:', error)
     return NextResponse.json({ error: 'Contact lookup failed' }, { status: 500 })
   }
 }

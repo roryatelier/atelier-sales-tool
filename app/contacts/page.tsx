@@ -1,5 +1,7 @@
 'use client'
 
+import { userStorage } from '@/lib/browser-storage'
+
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 
@@ -50,7 +52,7 @@ export default function ContactsPage() {
   const router = useRouter()
 
   useEffect(() => {
-    const stored = localStorage.getItem('current_dossier')
+    const stored = userStorage.getItem('current_dossier')
     if (!stored) { router.push('/portfolio'); return }
     const d = JSON.parse(stored)
     setDossier(d)
@@ -121,7 +123,7 @@ export default function ContactsPage() {
           body: JSON.stringify({
             brand_name: dossier.brand_name,
             website: (dossier as Dossier & {website?: string}).website ?? '',
-            lead_source: localStorage.getItem('lead_source') ?? 'Outbound',
+            lead_source: userStorage.getItem('lead_source') ?? 'Outbound',
             revenue_estimate: (dossier as Dossier & {revenue_estimate?: string}).revenue_estimate ?? '',
             retailers: (dossier as Dossier & {retailers?: unknown[]}).retailers ?? [],
             category: (dossier as Dossier & {category?: string}).category ?? '',
@@ -152,15 +154,15 @@ export default function ContactsPage() {
 
   function handleProceed() {
     if (!selectedContact) return
-    localStorage.setItem('selected_contact', JSON.stringify(selectedContact))
+    userStorage.setItem('selected_contact', JSON.stringify(selectedContact))
     router.push('/email')
   }
 
   function handleCustomizeGenerate() {
     if (!customizeContact) return
-    localStorage.setItem('selected_contact', JSON.stringify(customizeContact))
+    userStorage.setItem('selected_contact', JSON.stringify(customizeContact))
     if (selectedTemplate) {
-      localStorage.setItem('email_template', JSON.stringify(selectedTemplate))
+      userStorage.setItem('email_template', JSON.stringify(selectedTemplate))
     }
     router.push('/email')
   }

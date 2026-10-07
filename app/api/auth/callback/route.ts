@@ -1,82 +1,39 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { google } from 'googleapis'
-import { SignJWT } from 'jose'
+import { isAuthorizedEmail, securityConfigured, signSession, sealGmailCredentials } from '@/lib/auth-policy'
 
-const REDIRECT_URI = process.env.PRODUCTION_URL
-  ? `${process.env.PRODUCTION_URL}/api/auth/callback`
-  : 'http://localhost:3000/api/auth/callback'
-
-const APP_URL = process.env.PRODUCTION_URL ?? 'http://localhost:3000'
-const JWT_SECRET = new TextEncoder().encode(process.env.JWT_SECRET ?? 'atelier-dev-secret-key-change-in-prod')
-
+const cookieOptions = { httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'lax' as const, path: '/' }
+function clearAuth(response: NextResponse) {
+  for (const name of ['atelier_oauth_state', 'atelier_session', 'atelier_gmail', 'gmail_access_token', 'gmail_refresh_token']) response.cookies.set(name, '', { ...cookieOptions, maxAge: 0 })
+  return response
+}
 export async function GET(request: NextRequest) {
-  const { searchParams } = new URL(request.url)
-  const code = searchParams.get('code')
-
-  if (!code) {
-    return NextResponse.json({ error: 'No code provided' }, { status: 400 })
-  }
-
+  if (!securityConfigured()) return clearAuth(NextResponse.json({ error: 'Security configuration unavailable' }, { status: 503 }))
+  const state = request.nextUrl.searchParams.get('state')
+  const expected = request.cookies.get('atelier_oauth_state')?.value
+  if (!state || !expected || state !== expected) return clearAuth(NextResponse.json({ error: 'Invalid OAuth state. Start sign-in again.' }, { status: 400 }))
+  const code = request.nextUrl.searchParams.get('code')
+  if (!code) return clearAuth(NextResponse.json({ error: 'No authorization code provided' }, { status: 400 }))
   try {
-    const oauth2Client = new google.auth.OAuth2(
-      process.env.GMAIL_CLIENT_ID,
-      process.env.GMAIL_CLIENT_SECRET,
-      REDIRECT_URI
-    )
-
-    const { tokens } = await oauth2Client.getToken(code)
-    oauth2Client.setCredentials(tokens)
-
-    const oauth2 = google.oauth2({ version: 'v2', auth: oauth2Client })
-    const userInfo = await oauth2.userinfo.get()
-
-    const userEmail = userInfo.data.email ?? ''
-    const userName = userInfo.data.name ?? ''
-    const userPicture = userInfo.data.picture ?? ''
-
-    const jwt = await new SignJWT({
-      email: userEmail,
-      name: userName,
-      picture: userPicture,
-      accessToken: tokens.access_token,
-      refreshToken: tokens.refresh_token
-    })
-      .setProtectedHeader({ alg: 'HS256' })
-      .setExpirationTime('30d')
-      .sign(JWT_SECRET)
-
-    const response = NextResponse.redirect(`${APP_URL}/`)
-    response.cookies.set('atelier_session', jwt, {
-      httpOnly: true,
-      maxAge: 60 * 60 * 24 * 30,
-      path: '/',
-      secure: !!process.env.PRODUCTION_URL,
-      sameSite: 'lax'
-    })
-
-    const isProd = !!process.env.PRODUCTION_URL
-    response.cookies.set('gmail_access_token', tokens.access_token ?? '', {
-      httpOnly: true,
-      maxAge: 3600,
-      path: '/',
-      secure: isProd,
-      sameSite: 'lax'
-    })
-
-    if (tokens.refresh_token) {
-      response.cookies.set('gmail_refresh_token', tokens.refresh_token, {
-        httpOnly: true,
-        maxAge: 60 * 60 * 24 * 365,
-        path: '/',
-        secure: isProd,
-        sameSite: 'lax'
-      })
+    const base = process.env.PRODUCTION_URL ?? 'http://localhost:3000'
+    const client = new google.auth.OAuth2(process.env.GMAIL_CLIENT_ID, process.env.GMAIL_CLIENT_SECRET, base + '/api/auth/callback')
+    const { tokens } = await client.getToken(code)
+    client.setCredentials(tokens)
+    const { data } = await google.oauth2({ version: 'v2', auth: client }).userinfo.get()
+    const email = (data.email ?? '').trim().toLowerCase()
+    if (!data.id || data.verified_email !== true || !isAuthorizedEmail(email)) {
+      return clearAuth(NextResponse.json({ error: 'This Google account is not authorized' }, { status: 403 }))
     }
-
+    if (!tokens.access_token) throw new Error('No access token')
+    const user = { googleSub: data.id, email, name: data.name ?? '', picture: data.picture ?? '' }
+    const jwt = await signSession(user)
+    const credentials = await sealGmailCredentials({ googleSub: user.googleSub, email, accessToken: tokens.access_token, refreshToken: tokens.refresh_token ?? undefined })
+    const response = clearAuth(NextResponse.redirect(base + '/'))
+    response.cookies.set('atelier_session', jwt, { ...cookieOptions, maxAge: 60 * 60 * 24 * 30 })
+    response.cookies.set('atelier_gmail', credentials, { ...cookieOptions, maxAge: 60 * 60 * 24 * 30 })
     return response
-
-  } catch (error) {
-    console.error('OAuth callback error:', error)
-    return NextResponse.json({ error: 'Auth failed' }, { status: 500 })
+  } catch {
+    console.error('OAuth callback failed')
+    return clearAuth(NextResponse.json({ error: 'Authentication failed. Start sign-in again.' }, { status: 500 }))
   }
 }

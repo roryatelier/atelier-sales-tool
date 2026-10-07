@@ -1,5 +1,7 @@
 'use client'
 
+import { userStorage } from '@/lib/browser-storage'
+
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 
@@ -78,7 +80,7 @@ export default function SavedBrandsPage() {
       })
       const data = await res.json()
       if (data.success) {
-        localStorage.setItem('current_dossier', JSON.stringify(data.dossier))
+        userStorage.setItem('current_dossier', JSON.stringify(data.dossier))
         router.push('/dossier')
       }
     } catch {

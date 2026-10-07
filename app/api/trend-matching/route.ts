@@ -1,6 +1,11 @@
+import { logSafeError } from '@/lib/safe-log'
+import { authorizeRequest } from '@/lib/api-auth'
 import { NextRequest, NextResponse } from 'next/server'
 
 export async function POST(request: NextRequest) {
+  const auth = await authorizeRequest(request)
+  if (auth.error) return auth.error
+
   try {
     const body = await request.json()
     const { brands } = body
@@ -61,7 +66,7 @@ Return 4-6 trend matches as valid JSON only. No preamble, no markdown fences. Be
     return NextResponse.json({ success: true, matches })
 
   } catch (error) {
-    console.error('Trend matching error:', error)
+    logSafeError('Trend matching error:', error)
     return NextResponse.json({ error: 'Failed to fetch trend matches' }, { status: 500 })
   }
 }
