@@ -747,6 +747,16 @@ export default function EmailPage() {
     setShowScheduleModal(true)
   }
 
+  function setScheduleMinutesFromNow(minutes: number) {
+    const timezone = scheduleTimezone
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+    }).formatToParts(new Date(Date.now() + minutes * 60_000))
+    const value = (type: string) => parts.find(part => part.type === type)?.value ?? ''
+    setScheduledAt(`${value('year')}-${value('month')}-${value('day')}T${value('hour')}:${value('minute')}`)
+  }
+
   async function handleSchedule() {
     if (!email || !scheduledAt) return
     setScheduling(true)
@@ -1692,7 +1702,10 @@ export default function EmailPage() {
                 </div>
               )}
               <div style={{ marginBottom: 16 }}>
-                <label className="field-label">Date &amp; time</label>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <label className="field-label">Date &amp; time</label>
+                  <button type="button" onClick={() => setScheduleMinutesFromNow(5)} className="btn btn-ghost btn-sm">In 5 minutes</button>
+                </div>
                 <input
                   type="datetime-local"
                   value={scheduledAt}
@@ -1709,15 +1722,15 @@ export default function EmailPage() {
                   className="input"
                   style={{ cursor: 'pointer' }}
                 >
-                  <option value="Australia/Sydney">AEST — Sydney / Melbourne (UTC+10)</option>
-                  <option value="Australia/Perth">AWST — Perth (UTC+8)</option>
-                  <option value="America/New_York">EST — New York (UTC-5)</option>
-                  <option value="America/Los_Angeles">PST — Los Angeles (UTC-8)</option>
-                  <option value="America/Chicago">CST — Chicago (UTC-6)</option>
-                  <option value="Europe/London">GMT — London (UTC+0)</option>
-                  <option value="Europe/Paris">CET — Paris (UTC+1)</option>
-                  <option value="Asia/Singapore">SGT — Singapore (UTC+8)</option>
-                  <option value="Asia/Tokyo">JST — Tokyo (UTC+9)</option>
+                  <option value="Australia/Sydney">Sydney / Melbourne</option>
+                  <option value="Australia/Perth">Perth</option>
+                  <option value="America/New_York">New York</option>
+                  <option value="America/Los_Angeles">Los Angeles</option>
+                  <option value="America/Chicago">Chicago</option>
+                  <option value="Europe/London">London</option>
+                  <option value="Europe/Paris">Paris</option>
+                  <option value="Asia/Singapore">Singapore</option>
+                  <option value="Asia/Tokyo">Tokyo</option>
                 </select>
               </div>
               <div style={{ borderTop: '1px solid var(--black-100)', paddingTop: 16 }}>
