@@ -147,5 +147,5 @@ export async function GET(request: NextRequest) {
     pending = queue.pending
     nextDue = queue.next_due ? new Date(queue.next_due).toISOString() : null
   }
-  return NextResponse.json({ success: true, sent, needs_review: needsReview, needs_reauth: needsReauth, pending, next_due: nextDue, checked_at: new Date().toISOString() })
+  return NextResponse.json({ success: true, sent, needs_review: needsReview, needs_reauth: needsReauth, pending, next_due: nextDue, checked_at: new Date().toISOString(), database: isVercel ? 'postgres' : 'local' })
 }
