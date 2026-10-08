@@ -137,15 +137,20 @@ export async function GET(request: NextRequest) {
   }
   let pending = 0
   let nextDue: string | null = null
+  let states: Record<string, number> = {}
   if (isVercel) {
     const { sql } = await import('@vercel/postgres')
     const queue = await sql`SELECT COUNT(*)::int AS pending, MIN(scheduled_at) AS next_due FROM scheduled_emails WHERE delivery_status = 'pending'`
     pending = Number(queue.rows[0]?.pending ?? 0)
     nextDue = queue.rows[0]?.next_due ? new Date(queue.rows[0].next_due as string).toISOString() : null
+    const stateRows = await sql`SELECT delivery_status, COUNT(*)::int AS count FROM scheduled_emails GROUP BY delivery_status ORDER BY delivery_status`
+    states = Object.fromEntries(stateRows.rows.map(row => [String(row.delivery_status ?? 'unknown'), Number(row.count)]))
   } else {
     const queue = getLocalDb().prepare(`SELECT COUNT(*) AS pending, MIN(scheduled_at) AS next_due FROM scheduled_emails WHERE delivery_status = 'pending'`).get() as { pending: number; next_due: string | null }
     pending = queue.pending
     nextDue = queue.next_due ? new Date(queue.next_due).toISOString() : null
+    const stateRows = getLocalDb().prepare(`SELECT delivery_status, COUNT(*) AS count FROM scheduled_emails GROUP BY delivery_status ORDER BY delivery_status`).all() as { delivery_status: string | null; count: number }[]
+    states = Object.fromEntries(stateRows.map(row => [row.delivery_status ?? 'unknown', Number(row.count)]))
   }
-  return NextResponse.json({ success: true, sent, needs_review: needsReview, needs_reauth: needsReauth, pending, next_due: nextDue, checked_at: new Date().toISOString(), database: isVercel ? 'postgres' : 'local' })
+  return NextResponse.json({ success: true, sent, needs_review: needsReview, needs_reauth: needsReauth, pending, next_due: nextDue, checked_at: new Date().toISOString(), database: isVercel ? 'postgres' : 'local', states })
 }
