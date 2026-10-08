@@ -6,12 +6,14 @@ import { useEffect, useState } from 'react'
 export default function NavItems({ gmailUrl }: { gmailUrl: string }) {
   const pathname = usePathname()
   const [savedCount, setSavedCount] = useState(0)
+  const [sheetUrl, setSheetUrl] = useState<string | null>(null)
 
   useEffect(() => {
     Promise.all([
       fetch('/api/saved-suggestions').then(r => r.json()),
       fetch('/api/pipeline').then(r => r.json())
     ]).then(([savedData, pipelineData]) => {
+      if (pipelineData.success) setSheetUrl(pipelineData.sheet_url ?? null)
       if (savedData.success) {
         const pipelineNames = new Set(
           (pipelineData.leads ?? []).map((l: {brand_name: string}) => l.brand_name.toLowerCase())
@@ -84,14 +86,16 @@ export default function NavItems({ gmailUrl }: { gmailUrl: string }) {
           <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><line x1="8" y1="6" x2="21" y2="6" strokeWidth="2" strokeLinecap="round"/><line x1="8" y1="12" x2="21" y2="12" strokeWidth="2" strokeLinecap="round"/><line x1="8" y1="18" x2="21" y2="18" strokeWidth="2" strokeLinecap="round"/><line x1="3" y1="6" x2="3.01" y2="6" strokeWidth="2" strokeLinecap="round"/><line x1="3" y1="12" x2="3.01" y2="12" strokeWidth="2" strokeLinecap="round"/><line x1="3" y1="18" x2="3.01" y2="18" strokeWidth="2" strokeLinecap="round"/></svg>
           Pipeline
         </a>
-        <a href="https://docs.google.com/spreadsheets/d/1t2dGrIg9sQYGuqhU38qYcHBRM9XYmk3LFa_k_mA4cd8" target="_blank" rel="noreferrer" className="nav-item nav-subtab" style={{ paddingLeft: 40, fontSize: 12, opacity: 0.7 }}>
-          <svg width="13" height="13" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" strokeWidth="2" strokeLinecap="round"/>
-            <polyline points="15,3 21,3 21,9" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-            <line x1="10" y1="14" x2="21" y2="3" strokeWidth="2" strokeLinecap="round"/>
-          </svg>
-          Google Sheets ↗
-        </a>
+        {sheetUrl && (
+          <a href={sheetUrl} target="_blank" rel="noreferrer" className="nav-item nav-subtab" style={{ paddingLeft: 40, fontSize: 12, opacity: 0.7 }}>
+            <svg width="13" height="13" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" strokeWidth="2" strokeLinecap="round"/>
+              <polyline points="15,3 21,3 21,9" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+              <line x1="10" y1="14" x2="21" y2="3" strokeWidth="2" strokeLinecap="round"/>
+            </svg>
+            Google Sheets ↗
+          </a>
+        )}
       </div>
 
     </>

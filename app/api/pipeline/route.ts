@@ -4,6 +4,9 @@ import { NextResponse } from 'next/server'
 import { google } from 'googleapis'
 
 const SPREADSHEET_ID = process.env.GOOGLE_SHEETS_ID
+const spreadsheetUrl = SPREADSHEET_ID
+  ? `https://docs.google.com/spreadsheets/d/${SPREADSHEET_ID}`
+  : null
 
 export async function GET(request: Request) {
   const auth = await authorizeRequest(request)
@@ -32,7 +35,7 @@ export async function GET(request: Request) {
     const rows = response.data.values ?? []
 
     if (rows.length <= 1) {
-      return NextResponse.json({ success: true, leads: [] })
+      return NextResponse.json({ success: true, leads: [], sheet_url: spreadsheetUrl })
     }
 
     const leads = rows.slice(1)
@@ -56,10 +59,11 @@ export async function GET(request: Request) {
       email_body: row[12] ?? '',
       date_added: row[13] ?? '',
       status: row[14] ?? '',
+      notes: row[15] ?? '',
       sent_by: row[16] ?? ''
     }))
 
-    return NextResponse.json({ success: true, leads: leads.reverse() })
+    return NextResponse.json({ success: true, leads: leads.reverse(), sheet_url: spreadsheetUrl })
 
   } catch (error) {
     logSafeError('Pipeline fetch error:', error)

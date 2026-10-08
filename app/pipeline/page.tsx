@@ -38,6 +38,7 @@ export default function PipelinePage() {
   const [notesValue, setNotesValue] = useState<string>('')
   const [savingNotes, setSavingNotes] = useState(false)
   const [loadingBrand, setLoadingBrand] = useState<string | null>(null)
+  const [sheetUrl, setSheetUrl] = useState<string | null>(null)
 
   async function handleResearch(brandName: string) {
     setLoadingBrand(brandName)
@@ -67,6 +68,7 @@ export default function PipelinePage() {
         const data = await res.json()
         if (data.success) {
           setLeads(data.leads)
+          setSheetUrl(data.sheet_url ?? null)
         } else {
           setError('Failed to load pipeline.')
         }
@@ -177,20 +179,22 @@ export default function PipelinePage() {
           <div style={{ fontSize: 13, color: 'var(--slate-400)' }}>
             {leads.length} {leads.length === 1 ? 'brand' : 'brands'}
           </div>
-          <a
-            href="https://docs.google.com/spreadsheets/d/1t2dGrIg9sQYGuqhU38qYcHBRM9XYmk3LFa_k_mA4cd8"
-            target="_blank"
-            rel="noreferrer"
-            className="btn btn-secondary btn-sm"
-            style={{ display: 'flex', alignItems: 'center', gap: 6 }}
-          >
-            <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" strokeWidth="2" strokeLinecap="round"/>
-              <polyline points="15,3 21,3 21,9" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-              <line x1="10" y1="14" x2="21" y2="3" strokeWidth="2" strokeLinecap="round"/>
-            </svg>
-            Open in Google Sheets
-          </a>
+          {sheetUrl && (
+            <a
+              href={sheetUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="btn btn-secondary btn-sm"
+              style={{ display: 'flex', alignItems: 'center', gap: 6 }}
+            >
+              <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" strokeWidth="2" strokeLinecap="round"/>
+                <polyline points="15,3 21,3 21,9" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                <line x1="10" y1="14" x2="21" y2="3" strokeWidth="2" strokeLinecap="round"/>
+              </svg>
+              Open in Google Sheets
+            </a>
+          )}
         </div>
       </div>
       <p className="page-sub" style={{ marginBottom: 20 }}>All leads tracked across outbound, inbound, and referral channels.</p>
