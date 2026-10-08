@@ -1,12 +1,7 @@
 import { logSafeError } from '@/lib/safe-log'
 import { authorizeRequest } from '@/lib/api-auth'
+import { generateEmailWithOpenAI, generatePitchWithOpenAI, type OpenAIUsage } from '@/lib/openai-email'
 import { NextRequest, NextResponse } from 'next/server'
-import Anthropic from '@anthropic-ai/sdk'
-
-const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
-
-const RATE_PER_MILLION_INPUT = 3.00
-const RATE_PER_MILLION_OUTPUT = 15.00
 
 const MESSAGE_MATRIX: Record<string, { focus: string; proofPoints: string }> = {
   CFO: {
@@ -134,35 +129,21 @@ function runTrustGate(body: string, dossier: Record<string, unknown>): boolean {
 async function generateOnce(prompt: string, dossier: Record<string, unknown>): Promise<{
   email: { subject: string; body: string } | null
   passed: boolean
-  cost: number
+  usage: OpenAIUsage
   error?: string
 }> {
-  const response = await client.messages.create({
-    model: 'claude-sonnet-4-6',
-    max_tokens: 1500,
-    messages: [{ role: 'user', content: prompt }]
-  })
-
-  const cost =
-    (response.usage.input_tokens / 1_000_000) * RATE_PER_MILLION_INPUT +
-    (response.usage.output_tokens / 1_000_000) * RATE_PER_MILLION_OUTPUT
-
-  const rawText = response.content
-    .filter(block => block.type === 'text')
-    .map(block => (block as { type: 'text'; text: string }).text)
-    .join('')
-
-  const jsonMatch = rawText.match(/\{[\s\S]*\}/)
-  if (!jsonMatch) return { email: null, passed: false, cost, error: 'malformed response' }
-
-  let email: { subject: string; body: string }
   try {
-    email = JSON.parse(jsonMatch[0])
-  } catch {
-    return { email: null, passed: false, cost, error: 'parse error' }
+    const { email, usage } = await generateEmailWithOpenAI(prompt)
+    return { email, passed: runTrustGate(email.body, dossier), usage }
+  } catch (error) {
+    logSafeError('OpenAI email generation error:', error)
+    return {
+      email: null,
+      passed: false,
+      usage: { inputTokens: 0, outputTokens: 0 },
+      error: 'provider response unavailable'
+    }
   }
-
-  return { email, passed: runTrustGate(email.body, dossier), cost }
 }
 
 export async function POST(request: NextRequest) {
@@ -175,24 +156,7 @@ export async function POST(request: NextRequest) {
     if (body.pitch_only) {
       const dossier = body.dossier
       const signals = (dossier.signals ?? []).slice(0, 3).map((s: {description: string}) => s.description).join(' ')
-      const pitchRes = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': process.env.ANTHROPIC_API_KEY ?? '',
-          'anthropic-version': '2023-06-01'
-        },
-        body: JSON.stringify({
-          model: 'claude-sonnet-4-6',
-          max_tokens: 200,
-          messages: [{
-            role: 'user',
-            content: `You are a B2B sales strategist for Atelier, a GenAI platform that streamlines end-to-end NPD and manufacturing for prestige beauty brands — enabling brands to launch products 6x faster, increase R&D SKU capacity by 10x, reduce the cost of innovation to near $0, and 2x operating profit margins. Based on this brand research, write 2-3 sentences suggesting the best pitch angle for outreach. Be specific — reference actual signals, retailers, and growth indicators. Write in second person as if briefing a sales rep. Brand: ${dossier.brand_name}. ICP Score: ${dossier.icp_score} (${dossier.score_band}). Revenue: ${dossier.revenue_estimate ?? 'unknown'}. Retailers: ${(dossier.retailers ?? []).map((r: {name: string}) => r.name).join(', ')}. Key signals: ${signals}. Write only the pitch angle sentences. No preamble.`
-          }]
-        })
-      })
-      const pitchData = await pitchRes.json()
-      const pitch = pitchData.content?.[0]?.text ?? ''
+      const pitch = await generatePitchWithOpenAI(`You are a B2B sales strategist for Atelier, a GenAI platform that streamlines end-to-end NPD and manufacturing for prestige beauty brands — enabling brands to launch products 6x faster, increase R&D SKU capacity by 10x, reduce the cost of innovation to near $0, and 2x operating profit margins. Based on this brand research, write 2-3 sentences suggesting the best pitch angle for outreach. Be specific — reference actual signals, retailers, and growth indicators. Write in second person as if briefing a sales rep. Brand: ${dossier.brand_name}. ICP Score: ${dossier.icp_score} (${dossier.score_band}). Revenue: ${dossier.revenue_estimate ?? 'unknown'}. Retailers: ${(dossier.retailers ?? []).map((r: {name: string}) => r.name).join(', ')}. Key signals: ${signals}. Write only the pitch angle sentences. No preamble.`)
       return NextResponse.json({ success: true, pitch_angle: pitch })
     }
 
@@ -208,8 +172,9 @@ export async function POST(request: NextRequest) {
     const prompt = buildEmailPrompt(dossier, role, contact_name, template, pitch_bullet, follow_up, sender_name || undefined)
 
     let result = await generateOnce(prompt, dossier)
-    let totalCost = result.cost
-    console.log('Email generation attempt 1: $' + result.cost.toFixed(6) + ' USD, trust gate passed:', result.passed)
+    let totalInputTokens = result.usage.inputTokens
+    let totalOutputTokens = result.usage.outputTokens
+    console.log('Email generation attempt 1 tokens:', result.usage, 'trust gate passed:', result.passed)
 
     if (result.error) {
       return NextResponse.json({ error: 'Email generation failed — ' + result.error }, { status: 500 })
@@ -218,12 +183,13 @@ export async function POST(request: NextRequest) {
     if (!result.passed) {
       console.log('Trust gate failed on attempt 1, retrying silently...')
       const retry = await generateOnce(prompt, dossier)
-      totalCost += retry.cost
-      console.log('Email generation attempt 2: $' + retry.cost.toFixed(6) + ' USD, trust gate passed:', retry.passed)
+      totalInputTokens += retry.usage.inputTokens
+      totalOutputTokens += retry.usage.outputTokens
+      console.log('Email generation attempt 2 tokens:', retry.usage, 'trust gate passed:', retry.passed)
       if (!retry.error) result = retry
     }
 
-    console.log('Total email generation cost: $' + totalCost.toFixed(6) + ' USD')
+    console.log('Total email generation tokens:', { inputTokens: totalInputTokens, outputTokens: totalOutputTokens })
 
     if (!result.passed) {
       return NextResponse.json({

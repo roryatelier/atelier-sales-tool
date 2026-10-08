@@ -8,6 +8,7 @@
     "start": "next start",
     "lint": "eslint",
     "test:security": "node --test tests/security.cjs",
+    "test:email": "node --test tests/email-provider.cjs",
     "test:lusha": "node --test tests/lusha.cjs",
     "test:lusha:ui": "node --test tests/lusha-ui.cjs"
   },
