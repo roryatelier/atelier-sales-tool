@@ -9,6 +9,7 @@ const { NextRequest } = require('next/server');
 const root = path.resolve(__dirname, '..');
 let cookieValues = {};
 let providerCalls = 0;
+let sheetsShouldFail = false;
 let tokenData = { access_token: 'test-access' };
 let userData = { id: 'google-1', email: 'member@example.invalid', verified_email: true, name: 'Member', picture: '' };
 let logLines = [];
@@ -22,7 +23,13 @@ class MockOAuth {
   setCredentials() {}
   generateAuthUrl(options) { return 'https://accounts.google.com/test?state=' + options.state; }
 }
-const google = { auth: { OAuth2: MockOAuth }, oauth2: () => ({ userinfo: { get: async () => ({ data: userData }) } }), gmail: () => ({ users: { messages: { send: async () => { providerCalls++; return { data: { id: 'test-message-id' } }; } } } }) };
+class MockGoogleAuth {}
+const google = {
+  auth: { OAuth2: MockOAuth, GoogleAuth: MockGoogleAuth },
+  oauth2: () => ({ userinfo: { get: async () => ({ data: userData }) } }),
+  gmail: () => ({ users: { messages: { send: async () => { providerCalls++; return { data: { id: 'test-message-id' } }; } } } }),
+  sheets: () => ({ spreadsheets: { values: { append: async () => { if (sheetsShouldFail) throw new Error('Sheets unavailable'); } } } }),
+};
 function load(relative) {
   const filename = path.resolve(root, relative);
   if (cache.has(filename)) return cache.get(filename);
@@ -201,6 +208,21 @@ test('direct sends reject stale sender identity and invalid headers before Gmail
   assert.equal(providerCalls, before);
   const response = await send(request(valid));
   assert.equal(response.status, 200);
-  assert.equal((await response.json()).message_id, 'test-message-id');
+  const responseBody = await response.json();
+  assert.equal(responseBody.message_id, 'test-message-id');
+  assert.equal(responseBody.pipeline_synced, null);
   assert.equal(providerCalls, before + 1);
+
+  env.GOOGLE_SERVICE_ACCOUNT = '{}';
+  env.GOOGLE_SHEETS_ID = 'test-sheet';
+  sheetsShouldFail = true;
+  const partialResponse = await send(request({ ...valid, dossier: { brand_name: 'Test Brand' } }));
+  assert.equal(partialResponse.status, 200);
+  assert.equal((await partialResponse.json()).pipeline_synced, false);
+  sheetsShouldFail = false;
+  const syncedResponse = await send(request({ ...valid, dossier: { brand_name: 'Test Brand' } }));
+  assert.equal(syncedResponse.status, 200);
+  assert.equal((await syncedResponse.json()).pipeline_synced, true);
+  delete env.GOOGLE_SERVICE_ACCOUNT;
+  delete env.GOOGLE_SHEETS_ID;
 });

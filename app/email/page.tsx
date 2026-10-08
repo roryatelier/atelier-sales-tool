@@ -91,6 +91,7 @@ export default function EmailPage() {
   const [trustGatePassed, setTrustGatePassed] = useState<boolean | null>(null)
   const [showModal, setShowModal] = useState(false)
   const [sent, setSent] = useState(false)
+  const [pipelineSynced, setPipelineSynced] = useState<boolean | null>(null)
   const [needsAuth, setNeedsAuth] = useState(false)
   const [showTemplates, setShowTemplates] = useState(false)
   const [savedTemplates, setSavedTemplates] = useState<Template[]>([])
@@ -834,6 +835,7 @@ export default function EmailPage() {
       if (!res.ok || !data.success) { setError('Failed to send email. Please try again.'); setShowModal(false); return }
 
       setSent(true)
+      setPipelineSynced(data.pipeline_synced ?? null)
       setShowModal(false)
 
       const lsRaw = userStorage.getItem('follow_up_context')
@@ -944,7 +946,7 @@ export default function EmailPage() {
       </p>
 
       {sent && (
-        <div style={{ background: 'var(--green-100)', border: '1px solid var(--green-300)', borderRadius: 'var(--radius-md)', padding: '24px', marginBottom: 24, textAlign: 'center' }}>
+        <div style={{ background: pipelineSynced === false ? 'var(--orange-100)' : 'var(--green-100)', border: `1px solid ${pipelineSynced === false ? 'var(--orange-300)' : 'var(--green-300)'}`, borderRadius: 'var(--radius-md)', padding: '24px', marginBottom: 24, textAlign: 'center' }}>
           <div style={{ width: 48, height: 48, borderRadius: '50%', background: 'var(--green-400)', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 12px' }}>
             <svg width="22" height="22" fill="none" stroke="#fff" viewBox="0 0 24 24">
               <polyline points="20,6 9,17 4,12" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"/>
@@ -954,6 +956,11 @@ export default function EmailPage() {
           <div style={{ fontSize: 13, color: 'var(--green-400)', marginBottom: 20 }}>
             Sent to {contact?.name ? `${contact.name}${contact.role ? ` · ${contact.role}` : ''} · ${toEmail}` : toEmail}
           </div>
+          {pipelineSynced === false && (
+            <div style={{ fontSize: 13, color: 'var(--orange-500)', margin: '-8px auto 20px', maxWidth: 560 }}>
+              The email was sent, but it was not recorded in the pipeline. Please retry the pipeline sync before sending more outreach.
+            </div>
+          )}
           <div style={{ display: 'flex', gap: 12, justifyContent: 'center' }}>
             <button onClick={() => router.push('/portfolio')} className="btn btn-primary btn-sm">Research another brand</button>
             <button onClick={() => router.push('/pipeline')} className="btn btn-secondary btn-sm">View pipeline</button>

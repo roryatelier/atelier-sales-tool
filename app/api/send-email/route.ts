@@ -233,7 +233,9 @@ export async function POST(request: NextRequest) {
     }
 
     const dossier = body.dossier
+    let pipelineSynced: boolean | null = null
     if (dossier) {
+      pipelineSynced = false
       try {
         await appendPipelineRow({
             brand_name: dossier.brand_name,
@@ -252,6 +254,7 @@ export async function POST(request: NextRequest) {
             status: 'Sent',
             sent_by: auth.session.email
         })
+        pipelineSynced = true
       } catch {
         console.error('Sheets sync failed')
       }
@@ -277,7 +280,8 @@ export async function POST(request: NextRequest) {
       success: true,
       message_id: messageId,
       to,
-      contact_name: contactName
+      contact_name: contactName,
+      pipeline_synced: pipelineSynced
     })
 
     // Persist the refreshed token so subsequent requests don't need to refresh again
