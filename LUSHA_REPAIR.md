@@ -19,6 +19,6 @@ Browser setup uses signed synthetic sessions through the real proxy/layout, repl
 
 ## Release boundary
 
-This is local implementation evidence, not a production repair confirmation. Publishing is blocked while roryatelier has read-only repository access. Existing security configuration/key-rotation/deployment gates still apply. Before enabling live use, approve a numerical credit budget and designated domain/contact, then verify first/next page and one synchronous email-only reveal with waterfall disabled.
+This is local implementation evidence, not a production repair confirmation. Publication uses a fork pull request while roryatelier has read-only access to the source repository. The operator has confirmed revocation of the exposed key and supplied three approved users; replacement credentials, rotated application/service secrets, environment allowlist configuration and deployment checks remain release requirements. Before enabling live use, approve a numerical credit budget and designated domain/contact, then verify first/next page and one synchronous email-only reveal with waterfall disabled.
 
 Waterfall-only addresses and background jobs remain unsupported. An unexpected job preserves synchronous work email or displays a pending limitation. There is no durable cross-tab/reload/server-instance/crash deduplication; a deliberate new reveal may charge again. No database migration, shared contact cache, worker or CRM integration is included.
