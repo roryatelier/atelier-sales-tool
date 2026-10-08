@@ -14,10 +14,19 @@ export async function initialiseDb() {
     await sql`ALTER TABLE templates ADD COLUMN IF NOT EXISTS target_role TEXT DEFAULT ''`
     await sql`CREATE TABLE IF NOT EXISTS contact_history (id SERIAL PRIMARY KEY, brand_name TEXT NOT NULL, contact_role TEXT NOT NULL, contact_name TEXT NOT NULL, contact_email TEXT NOT NULL, method TEXT DEFAULT 'email', sent_at TIMESTAMP DEFAULT NOW())`
     await sql`CREATE TABLE IF NOT EXISTS saved_suggestions (id SERIAL PRIMARY KEY, brand_name TEXT NOT NULL UNIQUE, category TEXT NOT NULL, reason TEXT NOT NULL, signal TEXT NOT NULL, created_at TIMESTAMP DEFAULT NOW())`
-    await sql`CREATE TABLE IF NOT EXISTS scheduled_emails (id SERIAL PRIMARY KEY, to_email TEXT NOT NULL, cc TEXT, bcc TEXT, subject TEXT NOT NULL, body TEXT NOT NULL, brand_name TEXT, contact_name TEXT, scheduled_at TIMESTAMP NOT NULL, sent BOOLEAN DEFAULT false, created_at TIMESTAMP DEFAULT NOW(), gmail_access_token TEXT, gmail_refresh_token TEXT, timezone TEXT DEFAULT 'Australia/Sydney', sent_by TEXT DEFAULT '', dossier_json TEXT DEFAULT '')`
+    await sql`CREATE TABLE IF NOT EXISTS scheduled_emails (id SERIAL PRIMARY KEY, to_email TEXT NOT NULL, cc TEXT, bcc TEXT, subject TEXT NOT NULL, body TEXT NOT NULL, brand_name TEXT, contact_name TEXT, scheduled_at TIMESTAMP NOT NULL, sent BOOLEAN DEFAULT false, created_at TIMESTAMP DEFAULT NOW(), gmail_access_token TEXT, gmail_refresh_token TEXT, timezone TEXT DEFAULT 'Australia/Sydney', sent_by TEXT DEFAULT '', dossier_json TEXT DEFAULT '', owner_google_sub TEXT, owner_email TEXT, credential_ciphertext TEXT, delivery_status TEXT DEFAULT 'legacy_quarantined', attempt_count INTEGER DEFAULT 0, claimed_at TIMESTAMP, sent_at TIMESTAMP, gmail_message_id TEXT, last_error_code TEXT)`
     await sql`ALTER TABLE scheduled_emails ADD COLUMN IF NOT EXISTS timezone TEXT DEFAULT 'Australia/Sydney'`
     await sql`ALTER TABLE scheduled_emails ADD COLUMN IF NOT EXISTS sent_by TEXT DEFAULT ''`
     await sql`ALTER TABLE scheduled_emails ADD COLUMN IF NOT EXISTS dossier_json TEXT DEFAULT ''`
+    await sql`ALTER TABLE scheduled_emails ADD COLUMN IF NOT EXISTS owner_google_sub TEXT`
+    await sql`ALTER TABLE scheduled_emails ADD COLUMN IF NOT EXISTS owner_email TEXT`
+    await sql`ALTER TABLE scheduled_emails ADD COLUMN IF NOT EXISTS credential_ciphertext TEXT`
+    await sql`ALTER TABLE scheduled_emails ADD COLUMN IF NOT EXISTS delivery_status TEXT DEFAULT 'legacy_quarantined'`
+    await sql`ALTER TABLE scheduled_emails ADD COLUMN IF NOT EXISTS attempt_count INTEGER DEFAULT 0`
+    await sql`ALTER TABLE scheduled_emails ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMP`
+    await sql`ALTER TABLE scheduled_emails ADD COLUMN IF NOT EXISTS sent_at TIMESTAMP`
+    await sql`ALTER TABLE scheduled_emails ADD COLUMN IF NOT EXISTS gmail_message_id TEXT`
+    await sql`ALTER TABLE scheduled_emails ADD COLUMN IF NOT EXISTS last_error_code TEXT`
   } else {
     const Database = require('better-sqlite3')
     const path = require('path')
@@ -35,6 +44,15 @@ export async function initialiseDb() {
     try { db.exec(`ALTER TABLE scheduled_emails ADD COLUMN timezone TEXT DEFAULT 'Australia/Sydney'`) } catch {}
     try { db.exec(`ALTER TABLE scheduled_emails ADD COLUMN sent_by TEXT DEFAULT ''`) } catch {}
     try { db.exec(`ALTER TABLE scheduled_emails ADD COLUMN dossier_json TEXT DEFAULT ''`) } catch {}
+    try { db.exec(`ALTER TABLE scheduled_emails ADD COLUMN owner_google_sub TEXT`) } catch {}
+    try { db.exec(`ALTER TABLE scheduled_emails ADD COLUMN owner_email TEXT`) } catch {}
+    try { db.exec(`ALTER TABLE scheduled_emails ADD COLUMN credential_ciphertext TEXT`) } catch {}
+    try { db.exec(`ALTER TABLE scheduled_emails ADD COLUMN delivery_status TEXT DEFAULT 'legacy_quarantined'`) } catch {}
+    try { db.exec(`ALTER TABLE scheduled_emails ADD COLUMN attempt_count INTEGER DEFAULT 0`) } catch {}
+    try { db.exec(`ALTER TABLE scheduled_emails ADD COLUMN claimed_at TEXT`) } catch {}
+    try { db.exec(`ALTER TABLE scheduled_emails ADD COLUMN sent_at TEXT`) } catch {}
+    try { db.exec(`ALTER TABLE scheduled_emails ADD COLUMN gmail_message_id TEXT`) } catch {}
+    try { db.exec(`ALTER TABLE scheduled_emails ADD COLUMN last_error_code TEXT`) } catch {}
   }
 }
 

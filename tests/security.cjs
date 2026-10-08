@@ -147,18 +147,20 @@ test('OAuth state is required before exchange; unverified and non-member emails 
   assert.equal(response.cookies.get('gmail_refresh_token').value, '');
 });
 
-test('legacy scheduled jobs remain quarantined even with valid session and cron secret', async () => {
-  cookieValues = { atelier_session: await policy.signSession(user) };
-  const schedule = load('app/api/schedule-email/route.ts');
-  let response = await schedule.GET(new NextRequest('https://example.invalid/api/schedule-email'));
-  assert.equal((await response.json()).legacy_jobs_quarantined, true);
-  response = await schedule.POST(new NextRequest('https://example.invalid/api/schedule-email', { method: 'POST', headers: { origin: 'https://example.invalid' } }));
-  assert.equal(response.status, 503);
-  response = await schedule.DELETE(new NextRequest('https://example.invalid/api/schedule-email?id=1', { method: 'DELETE', headers: { origin: 'https://example.invalid' } }));
-  assert.equal(response.status, 409);
+test('scheduled delivery requires ownership, encrypted credentials and non-retrying claims', async () => {
+  const scheduleSource = fs.readFileSync(path.join(root, 'app/api/schedule-email/route.ts'), 'utf8');
+  const workerSource = fs.readFileSync(path.join(root, 'app/api/cron/send-scheduled-emails/route.ts'), 'utf8');
+  assert.ok(scheduleSource.includes('expectedGoogleSub'));
+  assert.ok(scheduleSource.includes('owner_google_sub'));
+  assert.ok(scheduleSource.includes('credential_ciphertext'));
+  assert.equal(scheduleSource.includes('gmail_refresh_token'), false);
+  assert.equal(scheduleSource.includes('gmail_access_token'), false);
+  assert.ok(workerSource.includes('FOR UPDATE SKIP LOCKED'));
+  assert.ok(workerSource.includes("delivery_status = 'sending'"));
+  assert.ok(workerSource.includes("'needs_review', 'gmail_send_ambiguous'"));
   const cron = load('app/api/cron/send-scheduled-emails/route.ts').GET;
-  response = await cron(new NextRequest('https://example.invalid/api/cron/send-scheduled-emails', { headers: { authorization: 'Bearer test-cron' } }));
-  assert.equal(response.status, 503);
+  assert.equal((await cron(new NextRequest('https://example.invalid/api/cron/send-scheduled-emails'))).status, 401);
+  assert.equal((await cron(new NextRequest('https://example.invalid/api/cron/send-scheduled-emails', { headers: { authorization: 'Bearer wrong' } }))).status, 401);
 });
 
 test('safe logging drops bearer tokens, bodies, headers and provider messages', () => {

@@ -766,6 +766,7 @@ export default function EmailPage() {
           timezone: scheduleTimezone,
           sent_by: userStorage.getItem('atelier_user_name') ?? '',
           dossier: dossier ?? undefined,
+          expectedGoogleSub: userGoogleSub,
         }),
       })
       const data = await res.json()

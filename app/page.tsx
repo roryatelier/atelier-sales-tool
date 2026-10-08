@@ -124,7 +124,7 @@ export default function Dashboard() {
   const [userName, setUserName] = useState('')
   const [activityItems, setActivityItems] = useState<ActivityItem[]>([])
   const [loadingActivity, setLoadingActivity] = useState(false)
-  const [scheduledEmails, setScheduledEmails] = useState<{id: number; to_email: string; subject: string; brand_name: string; contact_name: string; scheduled_at: string; timezone?: string}[]>([])
+  const [scheduledEmails, setScheduledEmails] = useState<{id: number; to_email: string; subject: string; brand_name: string; contact_name: string; scheduled_at: string; timezone?: string; delivery_status?: 'pending' | 'sending' | 'needs_reauth' | 'needs_review'; last_error_code?: string}[]>([])
   const [scheduledSendingPaused, setScheduledSendingPaused] = useState(false)
   const [timeFilter, setTimeFilter] = useState<TimeFilter>('All Time')
   const [userFilter, setUserFilter] = useState<string>('All')
@@ -844,8 +844,11 @@ export default function Dashboard() {
                       <div style={{ fontSize: 11, fontWeight: 500, color: '#050849', marginTop: 2 }}>
                         📅 {new Date(e.scheduled_at).toLocaleString('en-AU', { weekday: 'short', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' })} {(() => { try { return new Intl.DateTimeFormat('en-AU', { timeZone: e.timezone ?? 'Australia/Sydney', timeZoneName: 'short' }).formatToParts(new Date(e.scheduled_at)).find(p => p.type === 'timeZoneName')?.value ?? 'AEST' } catch { return 'AEST' } })()}
                       </div>
+                      {e.delivery_status === 'needs_reauth' && <div role="alert" style={{ fontSize: 11, color: 'var(--red-500)', marginTop: 3 }}>Not sent — reconnect Gmail, then schedule again.</div>}
+                      {e.delivery_status === 'needs_review' && <div role="alert" style={{ fontSize: 11, color: 'var(--red-500)', marginTop: 3 }}>Delivery uncertain — check Gmail Sent before trying again.</div>}
+                      {e.delivery_status === 'sending' && <div role="status" style={{ fontSize: 11, color: '#050849', marginTop: 3 }}>Sending now…</div>}
                     </div>
-                    <button
+                    {(!e.delivery_status || e.delivery_status === 'pending') && <button
                       onClick={async () => {
                         await fetch(`/api/schedule-email?id=${e.id}`, { method: 'DELETE' })
                         setScheduledEmails(prev => prev.filter(x => x.id !== e.id))
@@ -854,7 +857,7 @@ export default function Dashboard() {
                       style={{ flexShrink: 0, color: 'var(--red-500)', borderColor: 'var(--red-300)' }}
                     >
                       Cancel
-                    </button>
+                    </button>}
                   </div>
                 ))}
               </div>
