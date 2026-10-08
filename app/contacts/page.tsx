@@ -1,25 +1,14 @@
 'use client'
 
+import { useLushaContacts } from '@/app/components/useLushaContacts'
+import ContactEmailActions from '@/app/components/ContactEmailActions'
+import { validContactEmail } from '@/lib/lusha-contact'
 import { userStorage } from '@/lib/browser-storage'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
 
-interface Contact {
-  role: string
-  name: string
-  email: string
-  phone: string
-  linkedin: string
-  verified: boolean
-  placeholder?: boolean
-  lookup_failed?: boolean
-  department?: string
-  jobTitle?: string
-  seniority?: string
-  contactId?: string
-  canReveal?: { field: string; credits: number }[]
-}
+type Contact = import('@/lib/lusha-contact').LushaContact
 
 interface Dossier {
   brand_name: string
@@ -38,8 +27,8 @@ interface Template {
 
 export default function ContactsPage() {
   const [dossier, setDossier] = useState<Dossier | null>(null)
-  const [contacts, setContacts] = useState<Contact[]>([])
-  const [loading, setLoading] = useState(true)
+  const lookup = useLushaContacts()
+  const { contacts, loading, search: searchContacts } = lookup
   const [selectedContact, setSelectedContact] = useState<Contact | null>(null)
   const [showCustomize, setShowCustomize] = useState(false)
   const [templates, setTemplates] = useState<Template[]>([])
@@ -51,30 +40,11 @@ export default function ContactsPage() {
   const [contactSearch, setContactSearch] = useState('')
   const router = useRouter()
 
-  useEffect(() => {
-    const stored = userStorage.getItem('current_dossier')
-    if (!stored) { router.push('/portfolio'); return }
-    const d = JSON.parse(stored)
-    setDossier(d)
-    document.title = `${d.brand_name} Contacts — Atelier`
-    fetchContacts(d.brand_name, d.website)
-    fetchTemplates()
-  }, [router])
-
-  async function fetchContacts(brandName: string, website?: string) {
-    setLoading(true)
+  const fetchContacts = useCallback(async (brandName: string, website?: string) => {
+    void searchContacts(website ?? '')
     try {
-      const [contactsRes, historyRes] = await Promise.all([
-        fetch('/api/lookup-contacts', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ brand_name: brandName, domain: website ?? '' })
-        }),
-        fetch(`/api/contact-history?brand_name=${encodeURIComponent(brandName)}`)
-      ])
-      const contactsData = await contactsRes.json()
+      const historyRes = await fetch(`/api/contact-history?brand_name=${encodeURIComponent(brandName)}`)
       const historyData = await historyRes.json()
-      if (contactsData.success) setContacts(contactsData.contacts)
       if (historyData.success) {
         setContactHistory(historyData.history)
         setLoggedCalls(new Set(
@@ -85,10 +55,18 @@ export default function ContactsPage() {
       }
     } catch {
       console.error('Failed to fetch contacts')
-    } finally {
-      setLoading(false)
     }
-  }
+  }, [searchContacts])
+
+  useEffect(() => {
+    const stored = userStorage.getItem('current_dossier')
+    if (!stored) { router.push('/portfolio'); return }
+    const d = JSON.parse(stored)
+    setDossier(d)
+    document.title = `${d.brand_name} Contacts — Atelier`
+    fetchContacts(d.brand_name, d.website)
+    fetchTemplates()
+  }, [router,fetchContacts])
 
   async function fetchTemplates() {
     try {
@@ -153,14 +131,16 @@ export default function ContactsPage() {
   if (!dossier) return null
 
   function handleProceed() {
-    if (!selectedContact) return
-    userStorage.setItem('selected_contact', JSON.stringify(selectedContact))
+    const current = contacts.find(c => c.contactId === selectedContact?.contactId)
+    if (!current || !validContactEmail(current.email)) return
+    userStorage.setItem('selected_contact', JSON.stringify(current))
     router.push('/email')
   }
 
   function handleCustomizeGenerate() {
-    if (!customizeContact) return
-    userStorage.setItem('selected_contact', JSON.stringify(customizeContact))
+    const current = contacts.find(c => c.contactId === customizeContact?.contactId)
+    if (!current || !validContactEmail(current.email)) return
+    userStorage.setItem('selected_contact', JSON.stringify(current))
     if (selectedTemplate) {
       userStorage.setItem('email_template', JSON.stringify(selectedTemplate))
     }
@@ -168,7 +148,6 @@ export default function ContactsPage() {
   }
 
   const filteredContacts = contacts
-    .filter(c => !c.placeholder)
     .filter(c => contactSearch
       ? c.name.toLowerCase().includes(contactSearch.toLowerCase()) ||
         c.role.toLowerCase().includes(contactSearch.toLowerCase()) ||
@@ -204,6 +183,13 @@ export default function ContactsPage() {
       </div>
       <p className="page-sub" style={{ marginBottom: 16 }}>Select a contact to generate an outreach email or log a phone call.</p>
 
+      <form onClick={e => e.stopPropagation()} onSubmit={e => {e.preventDefault(); setSelectedContact(null); setCustomizeContact(null); void lookup.search(lookup.domain)}} style={{display:'flex',gap:8,marginBottom:12}}>
+        <input aria-label="Company domain" value={lookup.domain} onChange={e => lookup.setDomain(e.target.value)} placeholder="Company website or domain" />
+        <button type="submit" className="btn btn-secondary btn-sm">Search contacts</button>
+      </form>
+      {lookup.error && <p role="alert">{lookup.error}</p>}
+      <p>{contacts.length} contacts loaded</p>
+      {lookup.nextPage !== null && <button className="btn btn-secondary btn-sm" disabled={loading} onClick={e => {e.stopPropagation(); void lookup.search(lookup.domain,lookup.nextPage!)}}>Load more</button>}
       <div style={{ position: 'relative', marginBottom: 24 }}>
         <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', width: 16, height: 16, color: 'var(--slate-400)' }}>
           <circle cx="11" cy="11" r="8" strokeWidth="2"/>
@@ -297,7 +283,7 @@ export default function ContactsPage() {
 
             <button
               onClick={handleCustomizeGenerate}
-              disabled={!customizeContact}
+              disabled={!contacts.some(c => c.contactId === customizeContact?.contactId && validContactEmail(c.email))}
               className="btn btn-primary"
               style={{ height: 44 }}
             >
@@ -327,7 +313,7 @@ export default function ContactsPage() {
         </div>
       )}
 
-      {!loading && contacts.every(c => c.placeholder) && (
+      {!loading && !lookup.error && contacts.length === 0 && (
         <div className="data-warning" style={{ marginBottom: 24 }}>
           <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24" style={{ flexShrink: 0 }}>
             <circle cx="12" cy="12" r="10" strokeWidth="2"/>
@@ -372,11 +358,11 @@ export default function ContactsPage() {
                 </span>
               </div>
               <div className="contacts-grid">
-                {grouped[dept].map((contact, i) => (
+                {grouped[dept].map((contact) => (
                   <ContactCard
-                    key={`${dept}-${i}`}
+                    key={contact.contactId}
                     contact={contact}
-                    selected={selectedContact?.name === contact.name}
+                    selected={selectedContact?.contactId === contact.contactId}
                     onSelect={() => setSelectedContact(contact)}
                     lastContacted={
                       contactHistory
@@ -386,6 +372,7 @@ export default function ContactsPage() {
                     callLogged={loggedCalls.has(contact.contactId ?? contact.name)}
                     loggingCall={loggingCall === (contact.contactId ?? contact.name)}
                     onLogCall={() => handleLogCall(contact)}
+                    emailActions={<ContactEmailActions contact={contact} busy={lookup.revealing.includes(contact.contactId)} error={lookup.revealErrors[contact.contactId]} choices={lookup.choices[contact.contactId]} onReveal={() => lookup.reveal(contact)} onChoose={email => lookup.chooseEmail(contact.contactId,email)} />}
                   />
                 ))}
               </div>
@@ -397,7 +384,7 @@ export default function ContactsPage() {
       <div style={{ position: 'sticky', bottom: 24, zIndex: 10 }}>
         <button
           onClick={handleProceed}
-          disabled={!selectedContact}
+          disabled={!contacts.some(c => c.contactId === selectedContact?.contactId && validContactEmail(c.email))}
           className="btn btn-primary btn-block"
           style={{ height: 52, fontSize: 15, boxShadow: '0 4px 24px rgba(0,0,0,0.12)' }}
         >
@@ -408,7 +395,7 @@ export default function ContactsPage() {
   )
 }
 
-function ContactCard({ contact, selected, onSelect, lastContacted, callLogged, loggingCall, onLogCall }: {
+function ContactCard({ contact, selected, onSelect, lastContacted, callLogged, loggingCall, onLogCall, emailActions }: {
   contact: Contact
   selected: boolean
   onSelect: () => void
@@ -416,38 +403,9 @@ function ContactCard({ contact, selected, onSelect, lastContacted, callLogged, l
   callLogged?: boolean
   loggingCall?: boolean
   onLogCall: () => void
+  emailActions: React.ReactNode
 }) {
-  const [revealing, setRevealing] = useState(false)
-  const [email, setEmail] = useState(contact.email ?? '')
-  const [phone, setPhone] = useState(contact.phone ?? '')
-
-  async function handleReveal(e: React.MouseEvent) {
-    e.stopPropagation()
-    if (!contact.contactId || email) return
-    setRevealing(true)
-    try {
-      const res = await fetch('/api/lookup-contacts', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          brand_name: '',
-          enrich_id: contact.contactId
-        })
-      })
-      const data = await res.json()
-      if (data.success) {
-        setEmail(data.email)
-        setPhone(data.phone)
-        contact.email = data.email
-        contact.phone = data.phone
-      }
-    } catch {
-      console.error('Reveal failed')
-    } finally {
-      setRevealing(false)
-    }
-  }
-
+  const phone = contact.phone
   return (
     <div
       onClick={e => { e.stopPropagation(); onSelect() }}
@@ -472,29 +430,7 @@ function ContactCard({ contact, selected, onSelect, lastContacted, callLogged, l
 
       <div className="contact-name">{contact.name}</div>
 
-      {email ? (
-        <div className="contact-line">
-          <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <rect x="2" y="4" width="20" height="16" rx="2" strokeWidth="2"/>
-            <path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7" strokeWidth="2"/>
-          </svg>
-          {email}
-        </div>
-      ) : contact.contactId && !contact.placeholder ? (
-        <button
-          onClick={handleReveal}
-          disabled={revealing}
-          style={{
-            marginTop: 6, fontSize: 12, fontWeight: 500, padding: '4px 10px',
-            borderRadius: 'var(--radius-xs)', cursor: 'pointer',
-            border: '1px solid var(--brand-200)',
-            background: 'var(--brand-100)', color: 'var(--brand-400)',
-            display: 'inline-flex', alignItems: 'center', gap: 5
-          }}
-        >
-          {revealing ? 'Revealing...' : '✦ Reveal email & phone'}
-        </button>
-      ) : null}
+      {emailActions}
 
       {phone && (
         <div className="contact-line">

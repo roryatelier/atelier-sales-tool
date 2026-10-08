@@ -1,8 +1,11 @@
 'use client'
 
+import { useLushaContacts } from '@/app/components/useLushaContacts'
+import ContactEmailActions from '@/app/components/ContactEmailActions'
+import { validContactEmail } from '@/lib/lusha-contact'
 import { userStorage, activeStorageOwner, matchesDraftIdentity } from '@/lib/browser-storage'
 
-import React, { useEffect, useLayoutEffect, useState, useRef } from 'react'
+import React, { useEffect, useLayoutEffect, useState, useRef, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
 
 interface Contact {
@@ -65,7 +68,8 @@ interface TabSnapshot {
 export default function EmailPage() {
   const [dossier, setDossier] = useState<Dossier | null>(null)
   const [contact, setContact] = useState<Contact | null>(null)
-  const [allContacts, setAllContacts] = useState<Contact[]>([])
+  const lookup = useLushaContacts(contact)
+  const { contacts: allContacts, loading: loadingContacts, reset: resetContacts } = lookup
   const [selectedRole, setSelectedRole] = useState<string>('CEO')
   const [email, setEmail] = useState<Email | null>(null)
   const [loading, setLoading] = useState(false)
@@ -81,7 +85,6 @@ export default function EmailPage() {
   const [activeTemplate, setActiveTemplate] = useState<{ subject: string; body: string } | null>(null)
   const [roleSwitchedTo, setRoleSwitchedTo] = useState<string | null>(null)
   const [showContactDropdown, setShowContactDropdown] = useState(false)
-  const [loadingContacts, setLoadingContacts] = useState(false)
   const [contactHistory, setContactHistory] = useState<{contact_role: string; sent_at: string}[]>([])
   const [userName, setUserName] = useState('')
   const [userEmail, setUserEmail] = useState('')
@@ -117,7 +120,6 @@ export default function EmailPage() {
   const pitchRef = useRef<HTMLDivElement>(null)
   const router = useRouter()
   const [checked, setChecked] = useState(false)
-  const [revealingContact, setRevealingContact] = useState<string | null>(null)
   const [tabIds, setTabIds] = useState<string[]>(['tab-0'])
   const [activeTabId, setActiveTabId] = useState<string>('tab-0')
   const activeTabIdRef = useRef<string>('tab-0')
@@ -160,7 +162,7 @@ export default function EmailPage() {
     })
   }
 
-  function applyTabSnapshot(snap: TabSnapshot): void {
+  const applyTabSnapshot = useCallback((snap: TabSnapshot): void => {
     setDossier(snap.dossier)
     setContact(snap.contact)
     setSelectedRole(snap.selectedRole)
@@ -189,15 +191,14 @@ export default function EmailPage() {
     setShowContactDropdown(false)
     setShowPitch(false)
     setShowTimingDetail(false)
-    setAllContacts([])
+    resetContacts()
     setContactHistory([])
-    setLoadingContacts(false)
     setLoadingPitch(false)
     setCopied(false)
     setHasCopied(false)
     setLinkedInSent(false)
     setLinkedInSending(false)
-  }
+  }, [resetContacts])
 
   function switchTab(id: string): void {
     if (id === activeTabIdRef.current) return
@@ -358,7 +359,7 @@ export default function EmailPage() {
     }
 
     setChecked(true)
-  }, [router])
+  }, [router,applyTabSnapshot])
 
   useEffect(() => {
     if (!dossier) return
@@ -435,27 +436,13 @@ export default function EmailPage() {
 
   async function fetchAllContacts() {
     if (!dossier) return
-    setLoadingContacts(true)
+    void lookup.search((dossier as {website?: string}).website ?? '')
     try {
-      const [contactsRes, historyRes] = await Promise.all([
-        fetch('/api/lookup-contacts', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            brand_name: dossier.brand_name,
-            domain: (dossier as {website?: string}).website ?? ''
-          })
-        }),
-        fetch(`/api/contact-history?brand_name=${encodeURIComponent(dossier.brand_name as string)}`)
-      ])
-      const contactsData = await contactsRes.json()
+      const historyRes = await fetch(`/api/contact-history?brand_name=${encodeURIComponent(dossier.brand_name as string)}`)
       const historyData = await historyRes.json()
-      if (contactsData.success) setAllContacts(contactsData.contacts)
       if (historyData.success) setContactHistory(historyData.history)
     } catch {
       console.error('Failed to fetch contacts')
-    } finally {
-      setLoadingContacts(false)
     }
   }
 
@@ -560,24 +547,7 @@ export default function EmailPage() {
   }
 
   async function handleContactSelect(c: Contact) {
-    if (!c.email && c.contactId) {
-      setRevealingContact(c.contactId)
-      try {
-        const res = await fetch('/api/lookup-contacts', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ brand_name: '', enrich_id: c.contactId }),
-        })
-        const data = await res.json()
-        if (data.success && data.email) {
-          c = { ...c, email: data.email, phone: data.phone }
-        }
-      } catch {
-        // proceed with empty email — user types manually
-      } finally {
-        setRevealingContact(null)
-      }
-    }
+    if (!validContactEmail(c.email) || !matchesDraftIdentity(userGoogleSub,userGoogleSub)) return
     setShowContactDropdown(false)
     addTabForContact(c)
     // Explicitly set To field — don't rely on snapshot batching
@@ -760,7 +730,7 @@ export default function EmailPage() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          to: toEmail || contact?.email,
+          to: toEmail,
           cc: ccEmail || undefined,
           bcc: bccEmail || undefined,
           subject: email.subject,
@@ -819,7 +789,7 @@ export default function EmailPage() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          to: toEmail || contact?.email,
+          to: toEmail,
           cc: ccEmail,
           bcc: bccEmail,
           subject: email.subject,
@@ -958,7 +928,7 @@ export default function EmailPage() {
           </div>
           <div style={{ fontWeight: 600, fontSize: 16, color: 'var(--green-500)', marginBottom: 4 }}>Email sent successfully</div>
           <div style={{ fontSize: 13, color: 'var(--green-400)', marginBottom: 20 }}>
-            Sent to {contact?.name ? `${contact.name}${contact.role ? ` · ${contact.role}` : ''} · ${toEmail || contact.email}` : toEmail || contact?.email}
+            Sent to {contact?.name ? `${contact.name}${contact.role ? ` · ${contact.role}` : ''} · ${toEmail}` : toEmail}
           </div>
           <div style={{ display: 'flex', gap: 12, justifyContent: 'center' }}>
             <button onClick={() => router.push('/portfolio')} className="btn btn-primary btn-sm">Research another brand</button>
@@ -1094,21 +1064,28 @@ export default function EmailPage() {
               borderRadius: 'var(--radius-md)', boxShadow: 'var(--shadow-400)',
               minWidth: 280, zIndex: 50, maxHeight: 360, overflowY: 'auto'
             }}>
+              <form onSubmit={e => {e.preventDefault(); void lookup.search(lookup.domain)}} style={{padding:12}}>
+                <input aria-label="Company domain" value={lookup.domain} onChange={e => lookup.setDomain(e.target.value)} placeholder="Company website or domain" />
+                <button type="submit" className="btn btn-secondary btn-sm">Search contacts</button>
+              </form>
+              {lookup.error && <p role="alert" style={{padding:12}}>{lookup.error}</p>}
+              <p style={{padding:12}}>{allContacts.length} contacts loaded</p>
+              {lookup.nextPage !== null && <button className="btn btn-secondary btn-sm" disabled={loadingContacts} onClick={() => lookup.search(lookup.domain,lookup.nextPage!)}>Load more</button>}
               {loadingContacts && (
                 <div style={{ padding: '12px 16px', fontSize: 13, color: 'var(--slate-400)', display: 'flex', alignItems: 'center', gap: 8 }}>
                   <div className="spinner" /> Loading contacts...
                 </div>
               )}
-              {!loadingContacts && allContacts.length === 0 && (
+              {!loadingContacts && !lookup.error && allContacts.length === 0 && (
                 <div style={{ padding: '12px 16px', fontSize: 13, color: 'var(--slate-400)' }}>No contacts found</div>
               )}
               {!loadingContacts && allContacts.map((c, i) => {
                 const history = contactHistory.find(h => h.contact_role === c.role)
-                const isRevealing = revealingContact === c.contactId
-                const isBlocked = revealingContact !== null
+                const isRevealing = lookup.revealing.includes(c.contactId)
+                const isBlocked = !validContactEmail(c.email) || isRevealing
                 return (
                   <div
-                    key={i}
+                    key={c.contactId}
                     onClick={() => !isBlocked && handleContactSelect(c)}
                     style={{
                       padding: '10px 16px',
@@ -1128,6 +1105,7 @@ export default function EmailPage() {
                           {!c.verified && !history && <span style={{ fontSize: 10, color: 'var(--orange-400)' }}>Unverified</span>}
                         </div>
                         <div style={{ fontSize: 13, fontWeight: 500 }}>{c.name}</div>
+                        <ContactEmailActions contact={c} busy={isRevealing} error={lookup.revealErrors[c.contactId]} choices={lookup.choices[c.contactId]} onReveal={() => lookup.reveal(c)} onChoose={email => lookup.chooseEmail(c.contactId,email)} />
                         {isRevealing ? (
                           <div style={{ fontSize: 12, color: 'var(--slate-400)', display: 'flex', alignItems: 'center', gap: 5, marginTop: 1 }}>
                             <div className="spinner" style={{ width: 10, height: 10 }} /> Revealing...
@@ -1136,7 +1114,7 @@ export default function EmailPage() {
                           <div style={{ fontSize: 12, color: 'var(--slate-500)' }}>{c.email}</div>
                         ) : (
                           <div style={{ fontSize: 12, color: 'var(--slate-400)', fontStyle: 'italic' }}>
-                            {c.contactId ? 'Click to reveal email' : 'No email — enter manually'}
+                            Email not revealed
                           </div>
                         )}
                       </div>
@@ -1625,7 +1603,7 @@ export default function EmailPage() {
               </div>
               <div className="summary-row">
                 <div className="k">To</div>
-                <div className="v">{toEmail || contact?.email}</div>
+                <div className="v">{toEmail}</div>
               </div>
               {ccEmail && (
                 <div className="summary-row">
@@ -1711,7 +1689,7 @@ export default function EmailPage() {
                 </select>
               </div>
               <div style={{ borderTop: '1px solid var(--black-100)', paddingTop: 16 }}>
-                <div className="summary-row"><div className="k">To</div><div className="v">{toEmail || contact?.email || '—'}</div></div>
+                <div className="summary-row"><div className="k">To</div><div className="v">{toEmail || '—'}</div></div>
                 <div className="summary-row"><div className="k">Subject</div><div className="v">{email.subject}</div></div>
               </div>
             </div>
