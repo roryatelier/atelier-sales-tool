@@ -735,9 +735,9 @@ export default function EmailPage() {
   function getTimezoneForMarkets(markets?: string[]): string {
     if (!markets || markets.length === 0) return 'Australia/Sydney'
     const m = markets[0].toLowerCase()
-    if (m.includes('us') || m.includes('united states') || m.includes('america')) return 'America/New_York'
-    if (m.includes('uk') || m.includes('united kingdom') || m.includes('britain')) return 'Europe/London'
-    if (m.includes('eu') || m.includes('europe')) return 'Europe/London'
+    if (/^(us|usa|united states|united states of america|north america)$/.test(m)) return 'America/New_York'
+    if (/^(uk|united kingdom|great britain|britain)$/.test(m)) return 'Europe/London'
+    if (/^(eu|europe|european union)$/.test(m)) return 'Europe/London'
     return 'Australia/Sydney'
   }
 
