@@ -135,5 +135,17 @@ export async function GET(request: NextRequest) {
       needsReview++
     }
   }
-  return NextResponse.json({ success: true, sent, needs_review: needsReview, needs_reauth: needsReauth })
+  let pending = 0
+  let nextDue: string | null = null
+  if (isVercel) {
+    const { sql } = await import('@vercel/postgres')
+    const queue = await sql`SELECT COUNT(*)::int AS pending, MIN(scheduled_at) AS next_due FROM scheduled_emails WHERE delivery_status = 'pending'`
+    pending = Number(queue.rows[0]?.pending ?? 0)
+    nextDue = queue.rows[0]?.next_due ? new Date(queue.rows[0].next_due as string).toISOString() : null
+  } else {
+    const queue = getLocalDb().prepare(`SELECT COUNT(*) AS pending, MIN(scheduled_at) AS next_due FROM scheduled_emails WHERE delivery_status = 'pending'`).get() as { pending: number; next_due: string | null }
+    pending = queue.pending
+    nextDue = queue.next_due ? new Date(queue.next_due).toISOString() : null
+  }
+  return NextResponse.json({ success: true, sent, needs_review: needsReview, needs_reauth: needsReauth, pending, next_due: nextDue, checked_at: new Date().toISOString() })
 }
