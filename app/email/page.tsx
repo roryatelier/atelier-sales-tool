@@ -24,6 +24,18 @@ interface Dossier {
   [key: string]: unknown
 }
 
+const MANUAL_DRAFT_WARNING = 'AI draft unavailable — a basic editable draft has been created. Review and personalise it before sending.'
+
+function buildManualDraft(dossier: Dossier, contactName: string, senderName: string) {
+  const brandName = String(dossier.brand_name || 'your brand')
+  const firstName = contactName.trim().split(/\s+/)[0] || 'there'
+  const signOff = senderName.trim() ? `Thanks,\n${senderName.trim()}` : 'Thanks,'
+  return {
+    subject: `Atelier × ${brandName}`,
+    body: `Hi ${firstName},\n\nI wanted to introduce Atelier and explore whether we can support ${brandName}'s product development and manufacturing plans.\n\nWould you be open to a brief call?\n\n${signOff}`,
+  }
+}
+
 interface Email {
   subject: string
   body: string
@@ -497,6 +509,11 @@ export default function EmailPage() {
     const contactName = explicit
       ? (explicit.contactName || 'there')
       : (contact?.name ?? 'there')
+    const manualDraft = buildManualDraft(
+      activeDossier,
+      contactName,
+      userStorage.getItem('atelier_user_name') ?? ''
+    )
 
     try {
       const res = await fetch('/api/email', {
@@ -522,24 +539,31 @@ export default function EmailPage() {
             ...stale, loading: false,
             ...(res.ok && data.success
               ? { email: data.email, trustGatePassed: true, warning: '', error: '' }
-              : { trustGatePassed: false, warning: (!data.success && data.warning) ? data.warning : '', error: !res.ok ? 'Email generation failed. Please try again.' : '' })
+              : { email: manualDraft, trustGatePassed: false, warning: data.warning ? `${data.warning} ${MANUAL_DRAFT_WARNING}` : MANUAL_DRAFT_WARNING, error: '' })
           })
         }
         return
       }
 
-      if (!res.ok) { setError('Email generation failed. Please try again.'); setTrustGatePassed(false); return }
-      if (!data.success && data.warning) { setWarning(data.warning); setTrustGatePassed(false); return }
+      if (!res.ok || !data.success) {
+        setEmail(manualDraft)
+        setWarning(data.warning ? `${data.warning} ${MANUAL_DRAFT_WARNING}` : MANUAL_DRAFT_WARNING)
+        setError('')
+        setTrustGatePassed(false)
+        return
+      }
 
       setEmail(data.email)
       setTrustGatePassed(true)
     } catch {
       if (activeTabIdRef.current !== tabId) {
         const stale = tabDataRef.current.get(tabId)
-        if (stale) tabDataRef.current.set(tabId, { ...stale, loading: false, error: 'Something went wrong. Please try again.', trustGatePassed: false })
+        if (stale) tabDataRef.current.set(tabId, { ...stale, loading: false, email: manualDraft, warning: MANUAL_DRAFT_WARNING, error: '', trustGatePassed: false })
         return
       }
-      setError('Something went wrong. Please try again.')
+      setEmail(manualDraft)
+      setWarning(MANUAL_DRAFT_WARNING)
+      setError('')
       setTrustGatePassed(false)
     } finally {
       if (activeTabIdRef.current === tabId) setLoading(false)

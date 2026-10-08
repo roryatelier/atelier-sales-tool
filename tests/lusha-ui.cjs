@@ -19,7 +19,11 @@ test('real contacts and composer: pagination, explicit reveal, manual choice and
   fs.symlinkSync(path.join(root,'node_modules'),path.join(fixture,'node_modules'),'dir');
   fs.writeFileSync(path.join(fixture,'lib/db.ts'),"export const isVercel=false; export function getLocalDb(){throw Error('No fixture DB');} export async function initialiseDb(){throw Error('No fixture DB');}");
   for(const relative of tracked.filter(p=>p.startsWith('app/api/')&&p.endsWith('/route.ts')&&!p.includes('lookup-contacts')&&!p.includes('/me/'))) {
-    const dest=path.join(fixture,relative);fs.writeFileSync(dest,"import {NextResponse} from 'next/server'; const data={success:true,history:[],templates:[],email:{subject:'Fixture subject',body:'Fixture body'}}; export async function GET(){return NextResponse.json(data)} export async function POST(){return NextResponse.json(data)}");
+    const dest=path.join(fixture,relative);
+    const body=relative==='app/api/email/route.ts'
+      ? "import {NextResponse} from 'next/server'; export async function POST(){return NextResponse.json({error:'fixture provider unavailable'},{status:500})}"
+      : "import {NextResponse} from 'next/server'; const data={success:true,history:[],templates:[]}; export async function GET(){return NextResponse.json(data)} export async function POST(){return NextResponse.json(data)}";
+    fs.writeFileSync(dest,body);
   }
   fs.writeFileSync(path.join(fixture,'no-egress.cjs'),`const original=global.fetch; global.fetch=async(url,options)=>{const u=String(url);if(u.startsWith('https://api.lusha.com/v3/contacts/')){const b=JSON.parse(options.body);if(u.endsWith('/enrich')){if(b.ids[0]==='2')return new Response(JSON.stringify({status:'OUT_OF_CREDITS',results:[]}));if(b.ids[0]==='3')return new Response(JSON.stringify({results:[{id:'3',emails:[{email:'private3@example.invalid',type:'private'}]}]}));return new Response(JSON.stringify({results:[{id:b.ids[0],emails:[{email:'work'+b.ids[0]+'@example.invalid',type:'work'}]}]}));}const ids=Array.from({length:50},(_,i)=>String(i+(b.pagination.page===0?0:45)));return new Response(JSON.stringify({results:ids.map(id=>({id,firstName:'Contact',lastName:id,jobTitle:{title:'CEO'}})),pagination:{total:95,totalGuaranteed:true}}));}if(u.startsWith('http://localhost:'))return original(url,options);throw Error('Fixture blocked server egress');};`);
   const secret='synthetic-test-secret-only-'.repeat(3), email='tester@example.invalid';
@@ -42,6 +46,9 @@ test('real contacts and composer: pagination, explicit reveal, manual choice and
     await page.getByRole('button',{name:'Generate email for Contact 0',exact:true}).click();await page.waitForURL('**/email');
     await page.locator('input').filter({hasNot:page.locator('[type="hidden"]')}).first().waitFor();
     await page.waitForFunction(()=>[...document.querySelectorAll('input')].some(i=>i.value==='work0@example.invalid'));
+    await page.getByText('AI draft unavailable — a basic editable draft has been created. Review and personalise it before sending.',{exact:true}).waitFor();
+    assert.equal(await page.locator('input').evaluateAll(inputs=>inputs.find(i=>i.value==='Atelier × Fixture Brand')?.value),'Atelier × Fixture Brand');
+    assert.match(await page.locator('textarea').inputValue(),/^Hi Contact,/);
     await page.getByRole('button',{name:'Additional contacts'}).click();await page.getByText('50 contacts loaded',{exact:true}).waitFor();
     await page.getByRole('button',{name:'Load more',exact:true}).click();await page.getByText('95 contacts loaded',{exact:true}).waitFor();
     await page.getByText('Contact 2',{exact:true}).locator('..').getByRole('button',{name:'Reveal email',exact:true}).click();await page.getByRole('alert').filter({hasText:'credits'}).waitFor();
