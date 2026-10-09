@@ -79,7 +79,7 @@ export async function POST(request: Request) {
       validate: (value): value is { suggestions: Array<{ brand_name: string; category: string; reason: string; signal: string }> } =>
         isRecord(value) && Array.isArray(value.suggestions) && value.suggestions.length === 8
           && value.suggestions.every(item => isRecord(item) && ['brand_name', 'category', 'reason', 'signal'].every(key => isNonEmptyString(item[key]))),
-      maxOutputTokens: 1500
+      maxOutputTokens: 2500
     })
     const newSuggestions = response.data.suggestions
 

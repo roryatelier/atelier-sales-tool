@@ -135,7 +135,7 @@ Return exactly 3 specific, concrete talking points tailored to this role's conce
         schema: { type: 'object', properties: { bullets: { type: 'array', minItems: 3, maxItems: 3, items: { type: 'string' } } }, required: ['bullets'], additionalProperties: false },
         validate: (value): value is { bullets: [string, string, string] } => isRecord(value) && Array.isArray(value.bullets)
           && value.bullets.length === 3 && value.bullets.every(isNonEmptyString),
-        maxOutputTokens: 500,
+        maxOutputTokens: 800,
         maxAttempts: 1
       })
       pitchAngles[role] = result.data.bullets

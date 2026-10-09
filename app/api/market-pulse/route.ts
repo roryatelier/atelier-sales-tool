@@ -32,7 +32,7 @@ Return exactly 4 signals.`,
       validate: (value): value is { signals: Array<Record<string, string>> } => isRecord(value) && Array.isArray(value.signals)
         && value.signals.length === 4
         && value.signals.every(signal => isRecord(signal) && ['title', 'signal_type', 'summary', 'outreach_angle', 'urgency', 'date'].every(key => isNonEmptyString(signal[key]))),
-      maxOutputTokens: 1500
+      maxOutputTokens: 3000
     })
     return NextResponse.json({ success: true, signals: result.data.signals })
 

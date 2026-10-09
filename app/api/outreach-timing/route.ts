@@ -78,7 +78,7 @@ export async function POST(request: NextRequest) {
           && (value.news_summary === null || isNonEmptyString(value.news_summary))
           && ['high', 'medium', 'low'].includes(String(value.news_urgency))
           && (value.days_old === null || (typeof value.days_old === 'number' && value.days_old >= 0)),
-        maxOutputTokens: 500
+        maxOutputTokens: 1000
       })
       recentNews = result.data
     } catch (error) {

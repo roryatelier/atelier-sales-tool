@@ -32,7 +32,7 @@ Return 4-6 trend matches.`,
       validate: (value): value is { matches: Array<Record<string, string>> } => isRecord(value) && Array.isArray(value.matches)
         && value.matches.length >= 4 && value.matches.length <= 6
         && value.matches.every(match => isRecord(match) && ['trend', 'trend_summary', 'brand', 'match_reason', 'outreach_angle', 'momentum'].every(key => isNonEmptyString(match[key]))),
-      maxOutputTokens: 1500
+      maxOutputTokens: 3000
     })
     return NextResponse.json({ success: true, matches: result.data.matches })
 
