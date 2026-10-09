@@ -71,6 +71,7 @@ export default function PortfolioPage() {
   const [detail, setDetail]             = useState<Detail>({ kind: 'empty' })
   const [savedSet, setSavedSet]         = useState<Set<string>>(new Set())
   const [savingSet, setSavingSet]       = useState<Set<string>>(new Set())
+  const [actionError, setActionError]   = useState('')
   const router = useRouter()
 
   useEffect(() => {
@@ -114,6 +115,8 @@ export default function PortfolioPage() {
   }
 
   async function research(brandName: string) {
+    const previousDetail = detail
+    setActionError('')
     setSelected(brandName)
     setDetail({ kind: 'researching', brandName })
     try {
@@ -133,10 +136,12 @@ export default function PortfolioPage() {
         setDetail({ kind: 'preview', dossier: d })
         setSearch('')
       } else {
-        setDetail({ kind: 'empty' })
+        setDetail(previousDetail)
+        setActionError(data.error?.message ?? 'Brand research is unavailable. Try again.')
       }
     } catch {
-      setDetail({ kind: 'empty' })
+      setDetail(previousDetail)
+      setActionError('Brand research is unavailable. Check your connection and try again.')
     }
   }
 
@@ -159,6 +164,7 @@ export default function PortfolioPage() {
   async function getAiSuggestions() {
     if (loadingSugg) return
     setLoadingSugg(true)
+    setActionError('')
     try {
       const res = await fetch('/api/suggestions', {
         method: 'POST',
@@ -172,8 +178,10 @@ export default function PortfolioPage() {
           const seen = new Set(prev.map(q => q.brand_name.toLowerCase()))
           return [...prev, ...fresh.filter(s => !seen.has(s.brand_name.toLowerCase()))]
         })
-      }
-    } catch {} finally {
+      } else setActionError(data.error?.message ?? 'AI suggestions are unavailable. Try again.')
+    } catch {
+      setActionError('AI suggestions are unavailable. Check your connection and try again.')
+    } finally {
       setLoadingSugg(false)
     }
   }
@@ -266,6 +274,12 @@ export default function PortfolioPage() {
             </button>
           )}
         </div>
+        {actionError && (
+          <div role="alert" style={{ marginTop: 12, background: 'var(--red-100)', border: '1px solid var(--red-300)', borderRadius: 8, padding: '10px 12px', color: 'var(--red-500)', fontSize: 13, display: 'flex', justifyContent: 'space-between', gap: 12 }}>
+            <span>{actionError}</span>
+            <button onClick={() => setActionError('')} aria-label="Dismiss error" style={{ border: 0, background: 'transparent', color: 'inherit', cursor: 'pointer' }}>×</button>
+          </div>
+        )}
       </div>
 
       {/* ══════════════════════════════════════════
