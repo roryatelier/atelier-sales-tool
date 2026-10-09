@@ -1,6 +1,8 @@
 import { logSafeError } from '@/lib/safe-log'
 import { authorizeRequest } from '@/lib/api-auth'
 import { NextRequest, NextResponse } from 'next/server'
+import { generateStructured, publicProviderError } from '@/lib/openai'
+import { isNonEmptyString, isRecord } from '@/lib/validation'
 
 const ALL_ROLES: Record<string, string> = {
   CEO: 'topline revenue growth, speed to market, and competitive positioning',
@@ -115,19 +117,8 @@ export async function POST(request: NextRequest) {
     const pitchAngles: Record<string, string[]> = {}
 
     await Promise.all(roles.map(async role => {
-      const res = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': process.env.ANTHROPIC_API_KEY ?? '',
-          'anthropic-version': '2023-06-01'
-        },
-        body: JSON.stringify({
-          model: 'claude-sonnet-4-6',
-          max_tokens: 300,
-          messages: [{
-            role: 'user',
-            content: `You are a B2B sales strategist for Atelier, a GenAI platform that streamlines end-to-end NPD and manufacturing for prestige beauty brands — enabling brands to launch products 6x faster, increase R&D SKU capacity by 10x, reduce the cost of innovation to near $0, and 2x operating profit margins, powered by 8.5M+ supply chain permutations.
+      const result = await generateStructured<{ bullets: [string, string, string] }>({
+        prompt: `You are a B2B sales strategist for Atelier, a GenAI platform that streamlines end-to-end NPD and manufacturing for prestige beauty brands — enabling brands to launch products 6x faster, increase R&D SKU capacity by 10x, reduce the cost of innovation to near $0, and 2x operating profit margins, powered by 8.5M+ supply chain permutations.
 
 Write a pitch angle for reaching out to the ${role} of ${dossier.brand_name}. Their primary concern is ${ALL_ROLES[role]}.
 
@@ -138,24 +129,23 @@ Brand context:
 - Key signals:
 ${signalText}
 
-Return exactly 3 bullet points. Each bullet should be one specific, concrete talking point tailored to this role's concerns. Start each bullet with a dash (-). No preamble, no headers, just the 3 bullets.`
-          }]
-        })
+Return exactly 3 specific, concrete talking points tailored to this role's concerns.`,
+        purpose: 'email',
+        schemaName: 'role_pitch_angle',
+        schema: { type: 'object', properties: { bullets: { type: 'array', minItems: 3, maxItems: 3, items: { type: 'string' } } }, required: ['bullets'], additionalProperties: false },
+        validate: (value): value is { bullets: [string, string, string] } => isRecord(value) && Array.isArray(value.bullets)
+          && value.bullets.length === 3 && value.bullets.every(isNonEmptyString),
+        maxOutputTokens: 500,
+        maxAttempts: 1
       })
-      const data = await res.json()
-      const text = data.content?.[0]?.text ?? ''
-      const bullets = text
-        .split('\n')
-        .filter((line: string) => line.trim().startsWith('-'))
-        .map((line: string) => line.replace(/^-\s*/, '').trim())
-        .filter((line: string) => line.length > 0)
-      pitchAngles[role] = bullets
+      pitchAngles[role] = result.data.bullets
     }))
 
     return NextResponse.json({ success: true, pitchAngles, roles, recommended })
 
   } catch (error) {
     logSafeError('Pitch angle error:', error)
-    return NextResponse.json({ error: 'Failed to generate pitch angles' }, { status: 500 })
+    const failure = publicProviderError(error)
+    return NextResponse.json(failure.body, { status: failure.status })
   }
 }

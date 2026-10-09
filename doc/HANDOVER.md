@@ -10,10 +10,10 @@
 
 | Item | Details |
 |------|---------|
-| Live URL | https://atelier-three-chi.vercel.app |
-| GitHub | https://github.com/aina-cmyk/atelier |
+| Live URL | https://atelier-sales-preview.vercel.app |
+| GitHub | https://github.com/roryatelier/atelier-sales-tool |
 | Google Sheets Pipeline | https://docs.google.com/spreadsheets/d/1t2dGrIg9sQYGuqhU38qYcHBRM9XYmk3LFa_k_mA4cd8 |
-| Vercel Project | atelier-three-chi |
+| Vercel Project | atelier-sales-preview |
 | Primary user | Samara (VP of Client Partnerships) |
 
 ---
@@ -21,7 +21,7 @@
 ## How to Use the Tool (VP Workflow)
 
 ### Step 1 — Research a brand
-1. Open https://atelier-three-chi.vercel.app
+1. Open https://atelier-sales-preview.vercel.app
 2. Sign in with your Google account
 3. Type a brand name in the search box and click **Search**
 4. Wait ~20 seconds for the research dossier to load
@@ -60,8 +60,8 @@
 
 ## Adding a New User
 
-No setup required. The new user:
-1. Opens https://atelier-three-chi.vercel.app
+An administrator first adds the named user to `APP_ALLOWED_EMAILS` in Preview and Production and redeploys. The new user then:
+1. Opens https://atelier-sales-preview.vercel.app
 2. Gets redirected to Google OAuth
 3. Signs in with their Google account
 4. Grants permission to send emails
@@ -71,9 +71,9 @@ No setup required. The new user:
 
 ## Managing API Keys
 
-### Anthropic (Claude)
-- Manage at https://console.anthropic.com
-- To rotate: generate a new key → update in Vercel environment variables → redeploy
+### OpenAI
+- Manage at https://platform.openai.com/api-keys
+- To rotate: create a replacement key, update Preview and Production, revoke the old key, redeploy and run the provider canary
 
 ### Lusha (contacts)
 - Manage at https://dashboard.lusha.com
@@ -98,7 +98,7 @@ No setup required. The new user:
 ## Updating Environment Variables on Vercel
 
 1. Go to https://vercel.com
-2. Open the atelier-three-chi project
+2. Open the atelier-sales-preview project
 3. Go to **Settings** → **Environment Variables**
 4. Find the variable to update → click **Edit**
 5. Paste the new value → click **Save**
@@ -114,7 +114,7 @@ Cached dossiers are stored in Vercel Postgres. To force a brand to be re-researc
 DELETE FROM dossiers WHERE brand_name_normalised = 'brand name here';
 
 **Clear all cached dossiers:**
-Visit: `https://atelier-three-chi.vercel.app/api/clear-cache` with a DELETE request, or connect to the Vercel Postgres database directly via the Vercel dashboard → Storage → your database → Query.
+Visit: `https://atelier-sales-preview.vercel.app/api/clear-cache` with a DELETE request, or connect to the Vercel Postgres database directly via the Vercel dashboard → Storage → your database → Query.
 
 ---
 
@@ -171,7 +171,7 @@ These features were scoped out of the MVP but are recommended for v2:
 | Trend matching | ~$0.02–0.03 per scan |
 | Outreach timing | ~$0.01–0.02 per brand |
 
-At moderate usage (10 brands/day, 5 emails/day) estimated monthly cost: **~$15–30 USD** in Anthropic API credits.
+At moderate usage (10 brands/day, 5 emails/day) estimated monthly cost: **~$15–30 USD** in OpenAI API credits.
 
 Lusha credits are separate — 1 credit per email reveal, 5 per phone reveal.
 
@@ -180,5 +180,5 @@ Lusha credits are separate — 1 credit per email reveal, 5 per phone reveal.
 ## Contact for Questions
 
 - **Built by:** Aina Sekido (intern, June 2026)
-- **GitHub:** https://github.com/aina-cmyk/atelier
+- **GitHub:** https://github.com/roryatelier/atelier-sales-tool
 - **For technical questions:** Refer to README.md and docs/PROMPTS.md in the repo

@@ -1,6 +1,8 @@
 import { logSafeError } from '@/lib/safe-log'
 import { authorizeRequest } from '@/lib/api-auth'
 import { researchWithOpenAI } from '@/lib/openai-research'
+import { publicProviderError } from '@/lib/openai'
+import { isHttpUrl, isNonEmptyString, isRecord } from '@/lib/validation'
 import { NextRequest, NextResponse } from 'next/server'
 
 export async function POST(request: NextRequest) {
@@ -44,6 +46,13 @@ For each story provide:
         required: ['signals'],
         additionalProperties: false
       },
+      validate: (value): value is { signals: Array<{ date?: string; source: string }> } => {
+        if (!isRecord(value) || !Array.isArray(value.signals)) return false
+        return value.signals.every(signal => isRecord(signal)
+          && isNonEmptyString(signal.brand)
+          && isNonEmptyString(signal.headline)
+          && isHttpUrl(signal.source))
+      },
       maxOutputTokens: 2000
     })
 
@@ -67,6 +76,7 @@ For each story provide:
 
   } catch (error) {
     logSafeError('[competitor-signals] Unexpected error:', error)
-    return NextResponse.json({ error: 'Failed to fetch industry signals', detail: String(error) }, { status: 500 })
+    const failure = publicProviderError(error)
+    return NextResponse.json(failure.body, { status: failure.status })
   }
 }

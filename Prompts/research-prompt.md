@@ -8,8 +8,8 @@ Sprint 1 Blocker — Version-control before build begins.
 ## Usage
 
 Inject into `/api/research` backend route. Replace `{{BRAND_NAME}}` at call time.
-This prompt is the sole input to the Claude API call for Workflow 1, Steps 2–3.
-Model: `claude-sonnet-4-20250514`
+This prompt is supplied to the shared OpenAI Responses API client for Workflow 1, Steps 2–3.
+Model: `OPENAI_RESEARCH_MODEL`, then `OPENAI_MODEL`, default `gpt-5-mini`
 
 ---
 

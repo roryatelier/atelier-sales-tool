@@ -9,11 +9,11 @@ The Atelier Sales Intelligence Tool is an AI-powered B2B outreach platform built
 ## Tech Stack
 
 - **Framework:** Next.js 14 (App Router, TypeScript)
-- **AI:** Anthropic Claude Sonnet 4.6 with web search tool
+- **AI:** OpenAI Responses API with web search
 - **Database:** Vercel Postgres (production), SQLite via better-sqlite3 (local)
 - **Auth:** Google OAuth2 (Gmail send scope + userinfo)
 - **Integrations:** Lusha API v3 (contacts), Google Sheets API v4 (pipeline), Gmail API (send)
-- **Deployment:** Vercel (auto-deploy from GitHub main)
+- **Deployment:** Vercel project `atelier-sales-preview`; releases must pass CI, Preview smoke tests and production canaries
 - **Session:** JWT via jose library
 
 ---
@@ -22,7 +22,7 @@ The Atelier Sales Intelligence Tool is an AI-powered B2B outreach platform built
 
 - Node.js 18+
 - npm 9+
-- Anthropic API key
+- OpenAI API key
 - Google Cloud project with OAuth2 credentials and a service account
 - Lusha API key
 - A Google Sheet set up as the pipeline
@@ -33,7 +33,7 @@ The Atelier Sales Intelligence Tool is an AI-powered B2B outreach platform built
 
 ### 1. Clone the repo
 ```bash
-git clone https://github.com/aina-cmyk/atelier.git
+git clone https://github.com/roryatelier/atelier-sales-tool.git
 cd atelier
 ```
 
@@ -45,7 +45,9 @@ npm install
 ### 3. Set up environment variables
 Create a `.env.local` file in the root:
 
-ANTHROPIC_API_KEY=your_anthropic_api_key
+OPENAI_API_KEY=your_openai_api_key
+
+APP_ALLOWED_EMAILS=samara@atelier.co,ella@atelier.co,peter@atelier.co
 
 GMAIL_CLIENT_ID=your_google_oauth_client_id
 
@@ -58,6 +60,8 @@ GOOGLE_SERVICE_ACCOUNT={"type":"service_account","project_id":"..."}
 LUSHA_API_KEY=your_lusha_api_key
 
 JWT_SECRET=any_random_secret_string
+
+POSTGRES_URL=your_isolated_database_url
 
 PRODUCTION_URL=http://localhost:3000
 
@@ -98,7 +102,7 @@ In Google Cloud Console → OAuth2 credentials → Add authorised redirect URI:
 https://your-vercel-url.vercel.app/api/auth/callback
 
 ### 6. Deploy
-Vercel auto-deploys on every push to `main`.
+Production releases use the identity in `config/deployment.json` and must pass `npm run verify:release`, an isolated Preview smoke test and the production canary.
 
 ---
 
@@ -254,7 +258,8 @@ Saves a lead to the Google Sheets pipeline.
 
 | Variable | Description | Where to get it |
 |----------|-------------|-----------------|
-| `ANTHROPIC_API_KEY` | Claude API key | https://console.anthropic.com |
+| `OPENAI_API_KEY` | OpenAI project API key | https://platform.openai.com/api-keys |
+| `APP_ALLOWED_EMAILS` | Comma-separated named users allowed to sign in | Atelier administrator |
 | `GMAIL_CLIENT_ID` | Google OAuth client ID | Google Cloud Console → OAuth2 credentials |
 | `GMAIL_CLIENT_SECRET` | Google OAuth client secret | Google Cloud Console → OAuth2 credentials |
 | `GOOGLE_SHEETS_ID` | Pipeline spreadsheet ID | From the Google Sheets URL |
@@ -318,16 +323,16 @@ Brands are scored out of 100 across 5 criteria:
 
 ## Handover Checklist
 
-- [ ] **Live URL:** https://atelier-three-chi.vercel.app
-- [ ] **GitHub repo:** https://github.com/aina-cmyk/atelier
+- [ ] **Live URL:** https://atelier-sales-preview.vercel.app
+- [ ] **GitHub repo:** https://github.com/roryatelier/atelier-sales-tool
 - [ ] **Google Sheets pipeline:** https://docs.google.com/spreadsheets/d/1t2dGrIg9sQYGuqhU38qYcHBRM9XYmk3LFa_k_mA4cd8
-- [ ] **Vercel project:** atelier-three-chi (connected to GitHub main, auto-deploys)
-- [ ] **Service account credentials:** Held by Aina — transfer to Nick or designated Atelier admin
-- [ ] **Anthropic API key:** In Vercel environment variables — rotate via https://console.anthropic.com
+- [ ] **Vercel project:** `atelier-sales-preview` (`prj_SYLwZGYtiQQryVAMB5n0aAUALEnj`)
+- [ ] **Service account credentials:** Held and rotated by a designated Atelier administrator
+- [ ] **OpenAI API key:** In Vercel environment variables — rotate via https://platform.openai.com/api-keys
 - [ ] **Lusha API key:** In Vercel environment variables — manage via https://dashboard.lusha.com
 - [ ] **Gmail OAuth:** Each user authenticates with their own Google account on first login
-- [ ] **Adding a new user:** No setup required — user opens the tool URL and signs in with Google
-- [ ] **Rotating API keys:** Update in Vercel project settings → Environment Variables → redeploy
+- [ ] **Adding a new user:** Add the user to `APP_ALLOWED_EMAILS`, update Preview and Production, redeploy, then have them sign in with Google
+- [ ] **Rotating API keys:** Replace in both Preview and Production, revoke the old key, redeploy each target and run its canary
 
 ---
 
@@ -346,7 +351,7 @@ API Routes (/api/*)
 
 ┌─────────────────────────────────────┐
 
-│  Claude API (Anthropic)             │
+│  OpenAI Responses API             │
 
 │  - Web search tool (5 uses max)     │
 

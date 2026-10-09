@@ -108,6 +108,7 @@ export default function EmailPage() {
   const [showCc, setShowCc] = useState(false)
   const [showBcc, setShowBcc] = useState(false)
   const [pitchAngles, setPitchAngles] = useState<Record<string, string[]>>({})
+  const [pitchError, setPitchError] = useState('')
   const [pitchRoles, setPitchRoles] = useState<string[]>(['CEO', 'CMO', 'Head of NPD'])
   const [recommendedRole, setRecommendedRole] = useState<string>('')
   const [loadingPitch, setLoadingPitch] = useState(false)
@@ -305,7 +306,9 @@ export default function EmailPage() {
       body: JSON.stringify({ dossier: parsedDossier, last_contacted: lastContacted })
     }).then(r => r.json()).then(data => {
       if (data.success) setOutreachTiming(data.timing)
-    }).catch(() => {})
+      if (data.warning?.message) setWarning(data.warning.message)
+      if (!data.success && data.error?.message) setWarning(data.error.message)
+    }).catch(() => setWarning('Recent-news research is unavailable; the suggested day uses standard outreach timing.'))
 
     // Try to restore persisted tabs for the same brand
     let didRestore = false
@@ -472,6 +475,7 @@ export default function EmailPage() {
   async function fetchPitchAngles() {
     if (!dossier || loadingPitch || Object.keys(pitchAngles).length > 0) return
     setLoadingPitch(true)
+    setPitchError('')
     try {
       const res = await fetch('/api/pitch-angle', {
         method: 'POST',
@@ -479,14 +483,14 @@ export default function EmailPage() {
         body: JSON.stringify({ dossier })
       })
       const data = await res.json()
-      if (data.success) {
+      if (res.ok && data.success) {
         setPitchAngles(data.pitchAngles)
         setPitchRoles(data.roles)
         setRecommendedRole(data.recommended)
         setSelectedPitchRole(data.recommended ?? data.roles[0])
-      }
+      } else setPitchError(data.error?.message ?? 'Pitch angles are unavailable. Try again.')
     } catch {
-      console.error('Failed to fetch pitch angles')
+      setPitchError('Pitch angles are unavailable. Check your connection and try again.')
     } finally {
       setLoadingPitch(false)
     }
@@ -1476,6 +1480,11 @@ export default function EmailPage() {
                         <div className="spinner" /> Generating pitch angles...
                       </div>
                     )}
+                    {!loadingPitch && pitchError && (
+                      <div role="alert" style={{ fontSize: 13, color: 'var(--red-500)' }}>
+                        {pitchError} <button onClick={fetchPitchAngles} style={{ border: 0, background: 'transparent', color: 'inherit', textDecoration: 'underline', cursor: 'pointer' }}>Retry</button>
+                      </div>
+                    )}
                     {!loadingPitch && recommendedRole && pitchAngles[recommendedRole] && (
                       <>
                         <div style={{ fontSize: 11, fontWeight: 500, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--slate-400)', marginBottom: 10 }}>
@@ -1525,7 +1534,7 @@ export default function EmailPage() {
                         </ul>
                       </>
                     )}
-                    {!loadingPitch && (!recommendedRole || !pitchAngles[recommendedRole]) && (
+                    {!loadingPitch && !pitchError && (!recommendedRole || !pitchAngles[recommendedRole]) && (
                       <div style={{ fontSize: 13, color: 'var(--slate-400)' }}>No pitch angles yet</div>
                     )}
                   </div>

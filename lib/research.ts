@@ -1,5 +1,6 @@
 import { normaliseBrandName, isVercel, getLocalDb } from './db'
 import { researchWithOpenAI } from './openai-research'
+import { isNonEmptyString, isRecord } from './validation'
 
 const RATE_PER_MILLION_INPUT = 3.00
 const RATE_PER_MILLION_OUTPUT = 15.00
@@ -30,6 +31,7 @@ export async function researchBrand(brandName: string) {
     prompt,
     schemaName: 'brand_qualification_dossier',
     schema: BRAND_DOSSIER_SCHEMA,
+    validate: isResearchDossier,
     maxOutputTokens: 4000
   })
 
@@ -79,6 +81,15 @@ export async function researchBrand(brandName: string) {
   }
 
   return dossier
+}
+
+function isResearchDossier(value: unknown): value is ResearchDossier {
+  if (!isRecord(value) || !isNonEmptyString(value.brand_name)) return false
+  if (!isRecord(value.score_breakdown) || typeof value.icp_score !== 'number') return false
+  return ['Hot', 'Warm', 'Watch', 'Pass'].includes(String(value.score_band))
+    && Array.isArray(value.retailers)
+    && Array.isArray(value.signals)
+    && Array.isArray(value.competitors)
 }
 
 const nullableString = { type: ['string', 'null'] }

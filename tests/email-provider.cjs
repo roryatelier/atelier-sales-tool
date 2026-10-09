@@ -1,19 +1,10 @@
 /* eslint-disable @typescript-eslint/no-require-imports */
 const test = require('node:test')
 const assert = require('node:assert/strict')
-const fs = require('node:fs')
-const path = require('node:path')
-const vm = require('node:vm')
-const ts = require('typescript')
+const loadTypeScript = require('./load-ts.cjs')
 
 function loadProvider(fetchImpl, env = { OPENAI_API_KEY: 'synthetic-test-key' }) {
-  const filename = path.resolve(__dirname, '../lib/openai-email.ts')
-  const exports = {}
-  const source = ts.transpileModule(fs.readFileSync(filename, 'utf8'), {
-    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 }
-  }).outputText
-  vm.runInNewContext(source, { exports, process: { env }, fetch: fetchImpl }, { filename })
-  return exports
+  return loadTypeScript('../lib/openai-email.ts', { process: { env }, fetch: fetchImpl, Response })
 }
 
 test('email drafts use OpenAI Responses structured output', async () => {
@@ -41,6 +32,6 @@ test('provider errors expose status without leaking response content', async () 
   const provider = loadProvider(async () => new Response('provider-secret-details', { status: 401 }))
   await assert.rejects(
     provider.generateEmailWithOpenAI('draft prompt'),
-    error => error.message === 'OpenAI request failed with status 401' && !error.message.includes('provider-secret-details')
+    error => error.code === 'provider_authentication' && !error.message.includes('provider-secret-details')
   )
 })

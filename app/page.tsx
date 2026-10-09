@@ -319,6 +319,7 @@ export default function Dashboard() {
   async function fetchSuggestions() {
     setLoadingSuggestions(true)
     setSuggestionsLoaded(false)
+    setError('')
     try {
       const excludeBrands = leads.map(l => l.brand_name)
       const res = await fetch('/api/suggestions', {
@@ -327,13 +328,13 @@ export default function Dashboard() {
         body: JSON.stringify({ excludeBrands })
       })
       const data = await res.json()
-      if (data.success) {
+      if (res.ok && data.success) {
         setSuggestions(data.suggestions)
         setReengageSuggestions(data.reengageSuggestions ?? [])
         setSuggestionsLoaded(true)
-      }
+      } else setError(data.error?.message ?? 'Suggestions are unavailable. Try again.')
     } catch {
-      console.error('Failed to fetch suggestions')
+      setError('Suggestions are unavailable. Check your connection and try again.')
     } finally {
       setLoadingSuggestions(false)
     }
@@ -482,6 +483,7 @@ export default function Dashboard() {
     }
     if (!force && trendsLoaded) return
     setLoadingTrends(true)
+    setError('')
     try {
       const pipelineBrands = leads.map(l => ({
         brand_name: l.brand_name,
@@ -506,13 +508,13 @@ export default function Dashboard() {
         body: JSON.stringify({ brands: allBrands })
       })
       const data = await res.json()
-      if (data.success) {
+      if (res.ok && data.success) {
         setTrendMatches(data.matches)
         setTrendsLoaded(true)
         writeCache('cache_trend_matches', data.matches)
-      }
+      } else setError(data.error?.message ?? 'Trend matching is unavailable. Try again.')
     } catch {
-      console.error('Failed to fetch trend matches')
+      setError('Trend matching is unavailable. Check your connection and try again.')
     } finally {
       setLoadingTrends(false)
     }
@@ -526,16 +528,17 @@ export default function Dashboard() {
     }
     if (!force && marketPulseLoaded) return
     setLoadingMarketPulse(true)
+    setError('')
     try {
       const res = await fetch('/api/market-pulse')
       const data = await res.json()
-      if (data.success) {
+      if (res.ok && data.success) {
         setMarketPulse(data.signals)
         setMarketPulseLoaded(true)
         writeCache('cache_market_pulse', data.signals)
-      }
+      } else setError(data.error?.message ?? 'Market signals are unavailable. Try again.')
     } catch {
-      console.error('Failed to fetch market pulse')
+      setError('Market signals are unavailable. Check your connection and try again.')
     } finally {
       setLoadingMarketPulse(false)
     }
@@ -549,6 +552,7 @@ export default function Dashboard() {
     }
     if (!force && competitorSignalsLoaded) return
     setLoadingCompetitorSignals(true)
+    setError('')
     try {
       const res = await fetch('/api/competitor-signals', {
         method: 'POST',
@@ -556,13 +560,13 @@ export default function Dashboard() {
         body: JSON.stringify({})
       })
       const data = await res.json()
-      if (data.success) {
+      if (res.ok && data.success) {
         setCompetitorSignals(data.signals)
         setCompetitorSignalsLoaded(true)
         writeCache('cache_competitor_signals', data.signals)
-      }
+      } else setError(data.error?.message ?? 'Industry signals are unavailable. Try again.')
     } catch {
-      console.error('Failed to fetch industry signals')
+      setError('Industry signals are unavailable. Check your connection and try again.')
     } finally {
       setLoadingCompetitorSignals(false)
     }
@@ -692,6 +696,13 @@ export default function Dashboard() {
           .dash-activity-header { padding: 12px 16px !important; }
         }
       `}</style>
+
+      {error && (
+        <div role="alert" style={{ margin: '16px 40px 0', background: 'var(--red-100)', border: '1px solid var(--red-300)', borderRadius: 'var(--radius-md)', padding: '12px 16px', color: 'var(--red-500)', fontSize: 13, display: 'flex', justifyContent: 'space-between', gap: 12 }}>
+          <span>{error}</span>
+          <button onClick={() => setError('')} aria-label="Dismiss error" style={{ border: 0, background: 'transparent', color: 'inherit', cursor: 'pointer' }}>×</button>
+        </div>
+      )}
 
       {/* ── Top section: split pane ── */}
       <div className="dash-top" style={{ borderBottom: '0.5px solid var(--black-100)', flexShrink: 0 }}>

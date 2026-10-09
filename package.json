@@ -10,11 +10,18 @@
     "test:security": "node --test tests/security.cjs",
     "test:email": "node --test tests/email-provider.cjs",
     "test:research": "node --test tests/openai-research.cjs",
+    "test:provider": "node --test tests/openai-provider.cjs",
     "test:lusha": "node --test tests/lusha.cjs",
-    "test:lusha:ui": "node --test tests/lusha-ui.cjs"
+    "test:lusha:ui": "node --test tests/lusha-ui.cjs",
+    "check:types": "tsc --noEmit",
+    "check:provider-policy": "node scripts/check-provider-policy.mjs",
+    "check:env": "node scripts/check-env-contract.mjs",
+    "check:env-schema": "node scripts/check-env-contract.mjs --schema-only",
+    "check:deployment-target": "node scripts/check-deployment-target.mjs",
+    "verify:ci": "npm run check:types && npm run test:security && npm run test:provider && npm run test:email && npm run test:research && npm run test:lusha && npm run test:lusha:ui && npm run check:provider-policy && npm run check:env-schema && npm run build",
+    "verify:release": "npm run verify:ci && npm run check:env && npm run check:deployment-target"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.104.1",
     "@vercel/postgres": "^0.10.0",
     "better-sqlite3": "^12.10.0",
     "google-auth-library": "^10.7.0",

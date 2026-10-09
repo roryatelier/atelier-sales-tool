@@ -8,10 +8,10 @@ Sprint 2 Blocker — Version-control before Sprint 2 begins.
 ## Usage
 
 Inject into `/api/email` backend route. Replace all `{{PLACEHOLDERS}}` at call time from the stored dossier and VP's role selection.
-This prompt is the sole input to the Claude API call for Workflow 2, Step 2.
-Model: `claude-sonnet-4-20250514`
+This prompt is supplied to the shared OpenAI Responses API client for Workflow 2, Step 2.
+Model: `OPENAI_EMAIL_MODEL`, then `OPENAI_MODEL`, default `gpt-5-mini`
 
-Trust gate check runs **server-side after Claude returns** — it is not part of this prompt.
+Trust gate check runs **server-side after OpenAI returns** — it is not part of this prompt.
 
 ---
 

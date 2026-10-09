@@ -12,20 +12,20 @@
 
 The Atelier Sales Intelligence Tool is a full-stack web application built with Next.js 14 and TypeScript, deployed on Vercel. It automates brand research, ICP scoring, contact finding, and personalised email outreach for Atelier's sales team.
 
-**Live URL:** https://atelier-three-chi.vercel.app
-**GitHub:** https://github.com/aina-cmyk/atelier
+**Live URL:** https://atelier-sales-preview.vercel.app
+**GitHub:** https://github.com/roryatelier/atelier-sales-tool
 **Google Sheets Pipeline:** https://docs.google.com/spreadsheets/d/1t2dGrIg9sQYGuqhU38qYcHBRM9XYmk3LFa_k_mA4cd8
 
 ---
 
 ## Step 1 — Get Access to Everything
 
-Ask Aina to give you access to:
+The designated Atelier administrator grants access to:
 
-- [ ] **GitHub repo** — go to https://github.com/aina-cmyk/atelier → Settings → Collaborators → Add Nick and Jess's GitHub usernames
-- [ ] **Vercel project** — go to https://vercel.com → atelier-three-chi → Settings → Members → Invite Nick and Jess
-- [ ] **Google Cloud Console** — the project that holds the OAuth credentials and service account. Aina shares access via https://console.cloud.google.com
-- [ ] **Anthropic Console** — https://console.anthropic.com for the API key
+- [ ] **GitHub repo** — https://github.com/roryatelier/atelier-sales-tool
+- [ ] **Vercel project** — `atelier-sales-preview` in team `rory-ateliercos-projects`
+- [ ] **Google Cloud Console** — the project that holds the OAuth credentials and service account
+- [ ] **OpenAI Platform** — https://platform.openai.com/api-keys for the API key
 - [ ] **Lusha Dashboard** — https://dashboard.lusha.com for the contacts API key
 - [ ] **Google Sheets** — make sure Nick and Jess have Editor access to the pipeline sheet
 
@@ -42,22 +42,24 @@ To run the tool on your own machine:
 
 **Clone and install:**
 ```bash
-git clone https://github.com/aina-cmyk/atelier.git
+git clone https://github.com/roryatelier/atelier-sales-tool.git
 cd atelier
 npm install
 ```
 
 **Create environment file:**
-Create a file called `.env.local` in the root of the project and add these values (get them from Aina or Vercel):
+Create a file called `.env.local` in the root of the project and add values from the approved secret stores:
 
 ```
-ANTHROPIC_API_KEY=
+OPENAI_API_KEY=
+APP_ALLOWED_EMAILS=
 GMAIL_CLIENT_ID=
 GMAIL_CLIENT_SECRET=
 GOOGLE_SHEETS_ID=1t2dGrIg9sQYGuqhU38qYcHBRM9XYmk3LFa_k_mA4cd8
 GOOGLE_SERVICE_ACCOUNT=
 LUSHA_API_KEY=
 JWT_SECRET=
+POSTGRES_URL=
 PRODUCTION_URL=http://localhost:3000
 ```
 
@@ -126,7 +128,7 @@ Use Claude Code — an AI assistant that reads and edits your code directly in t
 
 ```bash
 # Install Claude Code (one time only)
-sudo npm install -g @anthropic-ai/claude-code
+sudo npm install -g @openai/codex
 
 # Start Claude Code in your project
 cd atelier
@@ -152,7 +154,7 @@ git commit -m "describe what you changed"
 git push
 ```
 
-Check the deployment status at https://vercel.com → atelier-three-chi → Deployments.
+Check the deployment status at https://vercel.com → atelier-sales-preview → Deployments.
 
 Build takes ~2 minutes. If it fails check the build logs in Vercel for the error.
 
@@ -162,12 +164,12 @@ Build takes ~2 minutes. If it fails check the build logs in Vercel for the error
 
 All API keys are stored in Vercel environment variables. To update them:
 
-1. Go to https://vercel.com → atelier-three-chi → Settings → Environment Variables
-2. Find the key to update → click Edit → paste new value → Save
-3. Go to Deployments → click Redeploy on the latest deployment
+1. Go to https://vercel.com → atelier-sales-preview → Settings → Environment Variables
+2. Add the replacement to Preview and Production without exposing it in chat or Git
+3. Revoke the old credential, deploy both targets and run their canaries
 
 **Key rotation schedule:**
-- Anthropic API key — rotate if compromised or quarterly
+- OpenAI API key — rotate after exposure and on the company rotation schedule
 - Lusha API key — rotate if compromised
 - Gmail OAuth — users re-authenticate via `/api/auth/gmail` if session expires
 - Google Service Account — rotate if compromised via Google Cloud Console
@@ -176,8 +178,8 @@ All API keys are stored in Vercel environment variables. To update them:
 
 ## Step 7 — Adding New Users
 
-No setup required. New users:
-1. Open https://atelier-three-chi.vercel.app
+Only approved users can sign in. Add their email to `APP_ALLOWED_EMAILS` in Preview and Production, redeploy, then:
+1. Open https://atelier-sales-preview.vercel.app
 2. Sign in with their Google account
 3. Grant Gmail permission
 4. They're ready to use the tool
@@ -193,7 +195,7 @@ To ensure their Google account works, add their email as a test user in Google C
 | Gmail auth required banner | Go to /api/auth/gmail and re-authenticate |
 | Pipeline not loading | Check GOOGLE_SHEETS_ID in Vercel env vars |
 | Contacts not showing | Check LUSHA_API_KEY in Vercel env vars |
-| Emails not generating | Check ANTHROPIC_API_KEY in Vercel env vars |
+| Emails not generating | Check OPENAI_API_KEY in Vercel env vars and run the provider canary |
 | Scheduled sends not firing | Check Vercel → Settings → Crons, verify CRON_SECRET is set |
 | Build failing | Run npm run build locally and fix the error shown |
 | Brand scores seem wrong | Clear dossier cache — delete from dossiers table in Vercel Postgres |
@@ -204,7 +206,7 @@ To ensure their Google account works, add their email as a test user in Google C
 
 | Service | Cost | Monitor at |
 |---------|------|------------|
-| Anthropic (Claude) | ~$0.02-0.10 per action | console.anthropic.com |
+| OpenAI | ~$0.02-0.10 per action | platform.openai.com |
 | Lusha (contacts) | 1 credit per email reveal | dashboard.lusha.com |
 | Vercel (hosting) | Pro plan ~$20/month | vercel.com |
 | Vercel Postgres | Included in Pro | vercel.com |

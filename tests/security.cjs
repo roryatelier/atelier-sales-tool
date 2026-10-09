@@ -45,7 +45,6 @@ function load(relative) {
       if (name === 'next/server') return require('next/server');
       if (name === 'next/headers') return { cookies: async () => ({ get: name => cookieValues[name] ? { value: cookieValues[name] } : undefined }) };
       if (name === 'googleapis') return { google };
-      if (name === '@anthropic-ai/sdk') return class { constructor() { this.messages = { create: async () => { providerCalls++; throw new Error('Unexpected AI call'); } }; } };
       if (name === '@/lib/db') return { initialiseDb: async () => { providerCalls++; throw new Error('Unexpected DB call'); }, isVercel: false };
       if (name.startsWith('@/')) return load(name.slice(2) + '.ts');
       if (name.startsWith('.')) return load(path.relative(root, path.resolve(path.dirname(filename), name)) + '.ts');

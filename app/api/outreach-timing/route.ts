@@ -1,6 +1,10 @@
 import { logSafeError } from '@/lib/safe-log'
 import { authorizeRequest } from '@/lib/api-auth'
 import { NextRequest, NextResponse } from 'next/server'
+import { publicProviderError, researchStructured } from '@/lib/openai'
+import { isNonEmptyString, isRecord } from '@/lib/validation'
+
+type RecentNews = { has_recent_news: boolean; news_summary: string | null; news_urgency: 'high' | 'medium' | 'low'; days_old: number | null }
 
 function getBestDay(): { day: string; date: string; reason: string } {
   const today = new Date()
@@ -54,55 +58,33 @@ export async function POST(request: NextRequest) {
     const { day, date, reason } = getBestDay()
     const daysSinceContact = getDaysSinceContact(last_contacted)
 
-    // Search for recent brand-specific news
-    const searchRes = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': process.env.ANTHROPIC_API_KEY ?? '',
-        'anthropic-version': '2023-06-01'
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-6',
-        max_tokens: 500,
-        tools: [{
-          type: 'web_search_20250305',
-          name: 'web_search',
-          max_uses: 2
-        }],
-        messages: [{
-          role: 'user',
-          content: `Search for any news about ${dossier.brand_name} in the last 14 days. Look for product launches, funding announcements, retail partnerships, leadership changes, or supply chain news.
-
-Return a JSON object only. No preamble, no markdown fences:
-{
-  "has_recent_news": true or false,
-  "news_summary": "one sentence summary of the most recent news, or null if none",
-  "news_urgency": "high | medium | low",
-  "days_old": number (approximate days since the news, or null)
-}`
-        }]
-      })
-    })
-
-    const searchData = await searchRes.json()
-    const rawText = (searchData.content ?? [])
-      .filter((b: { type: string }) => b.type === 'text')
-      .map((b: { text: string }) => b.text)
-      .join('')
-
-    let recentNews: { has_recent_news: boolean; news_summary: string | null; news_urgency: string; days_old: number | null } = {
+    let recentNews: RecentNews = {
       has_recent_news: false,
       news_summary: null,
       news_urgency: 'low',
       days_old: null
     }
-
+    let researchStatus: 'complete' | 'unavailable' = 'complete'
+    let warning: ReturnType<typeof publicProviderError>['body']['error'] | undefined
     try {
-      const jsonMatch = rawText.match(/\{[\s\S]*\}/)
-      if (jsonMatch) recentNews = JSON.parse(jsonMatch[0])
-    } catch {
-      // use defaults
+      const result = await researchStructured<RecentNews>({
+        prompt: `Search for any news about ${dossier.brand_name} in the last 14 days. Look for product launches, funding announcements, retail partnerships, leadership changes, or supply chain news. Report the most recent relevant item, or state that none was found.`,
+        schemaName: 'recent_brand_news',
+        schema: { type: 'object', properties: {
+          has_recent_news: { type: 'boolean' }, news_summary: { type: ['string', 'null'] }, news_urgency: { type: 'string', enum: ['high', 'medium', 'low'] }, days_old: { type: ['number', 'null'] }
+        }, required: ['has_recent_news', 'news_summary', 'news_urgency', 'days_old'], additionalProperties: false },
+        validate: (value): value is RecentNews => isRecord(value)
+          && typeof value.has_recent_news === 'boolean'
+          && (value.news_summary === null || isNonEmptyString(value.news_summary))
+          && ['high', 'medium', 'low'].includes(String(value.news_urgency))
+          && (value.days_old === null || (typeof value.days_old === 'number' && value.days_old >= 0)),
+        maxOutputTokens: 500
+      })
+      recentNews = result.data
+    } catch (error) {
+      logSafeError('Outreach news research degraded:', error)
+      researchStatus = 'unavailable'
+      warning = publicProviderError(error).body.error
     }
 
     // Determine urgency combining signals + recent news + days since contact
@@ -146,12 +128,15 @@ Return a JSON object only. No preamble, no markdown fences:
         urgency_reason,
         signal_context: signalContext,
         within_hours,
-        recent_news: recentNews.has_recent_news ? recentNews.news_summary : null
-      }
+        recent_news: recentNews.has_recent_news ? recentNews.news_summary : null,
+        research_status: researchStatus
+      },
+      ...(warning ? { warning } : {})
     })
 
   } catch (error) {
     logSafeError('Outreach timing error:', error)
-    return NextResponse.json({ error: 'Failed to calculate timing' }, { status: 500 })
+    const failure = publicProviderError(error)
+    return NextResponse.json(failure.body, { status: failure.status })
   }
 }
