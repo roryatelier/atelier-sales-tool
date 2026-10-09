@@ -50,6 +50,21 @@ function relativeDate(dateStr: string): string {
   return dateStr
 }
 
+function cleanSignalDate(value: string): string {
+  return value.split('\",\"source\"')[0].trim()
+}
+
+function signalSourceUrl(value?: string): string | null {
+  const candidate = value?.match(/https?:\/\/[^)\s]+/)?.[0]
+  if (!candidate) return null
+  try {
+    const url = new URL(candidate)
+    return url.protocol === 'https:' || url.protocol === 'http:' ? url.toString() : null
+  } catch {
+    return null
+  }
+}
+
 const STEPS = [
   'Scanning web & news presence',
   'Matching against your ICP',
@@ -107,7 +122,7 @@ export default function Dashboard() {
   const [reengageSuggestions, setReengageSuggestions] = useState<Suggestion[]>([])
   const [savingBrand, setSavingBrand] = useState<string | null>(null)
   const [savedBrands, setSavedBrands] = useState<Set<string>>(new Set())
-  const [competitorSignals, setCompetitorSignals] = useState<{brand?: string; competitor?: string; pipeline_brand?: string; signal_type: string; headline: string; why_it_matters: string; date: string}[]>([])
+  const [competitorSignals, setCompetitorSignals] = useState<{brand?: string; competitor?: string; pipeline_brand?: string; signal_type: string; headline: string; why_it_matters: string; date: string; source?: string}[]>([])
   const [loadingCompetitorSignals, setLoadingCompetitorSignals] = useState(false)
   const [competitorSignalsLoaded, setCompetitorSignalsLoaded] = useState(false)
   const [overdueLeads, setOverdueLeads] = useState<Lead[]>([])
@@ -1005,7 +1020,8 @@ export default function Dashboard() {
                   <div key={i} className="card-hair" style={{ padding: '12px 16px' }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
                       <span onClick={() => handleResearch(signal.brand ?? signal.competitor ?? '')} style={{ fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--brand-400)', cursor: 'pointer', textDecoration: 'underline', textDecorationColor: 'var(--brand-200)' }}>{signal.brand ?? signal.competitor}</span>
-                      <span style={{ fontSize: 11, color: 'var(--slate-300)' }}>· {signal.date}</span>
+                      <span style={{ fontSize: 11, color: 'var(--slate-300)' }}>· {cleanSignalDate(signal.date)}</span>
+                      {signalSourceUrl(signal.source ?? signal.date) && <a href={signalSourceUrl(signal.source ?? signal.date) ?? '#'} target="_blank" rel="noreferrer" style={{ fontSize: 11, color: 'var(--brand-400)', marginLeft: 'auto' }}>Source ↗</a>}
                     </div>
                     <div style={{ fontSize: 13, fontWeight: 500, marginBottom: 4 }}>{signal.headline}</div>
                     <div style={{ fontSize: 12, color: 'var(--slate-500)', lineHeight: 1.4 }}><span style={{ fontWeight: 500, color: 'var(--brand-400)' }}>Why it matters: </span>{signal.why_it_matters}</div>

@@ -8,7 +8,7 @@ export async function POST(request: NextRequest) {
   if (auth.error) return auth.error
 
   try {
-    const result = await researchWithOpenAI<{ signals: Array<{ date?: string }> }>({
+    const result = await researchWithOpenAI<{ signals: Array<{ date?: string; source: string }> }>({
       prompt: `Search for 5 recent beauty industry news stories from the last 30 days. Return current, verifiable stories relevant to outreach for Atelier.
 
 For each story provide:
@@ -17,7 +17,8 @@ For each story provide:
     "signal_type": "launch | funding | retail | expansion | celebrity | leadership | trend",
     "headline": "one sentence summary",
     "why_it_matters": "why this matters for a GenAI-powered NPD and manufacturing platform serving prestige beauty brands",
-    "date": "Month Year"
+    "date": "Month Year",
+    "source": "direct https URL for the story"
 }`,
       schemaName: 'beauty_industry_signals',
       schema: {
@@ -32,9 +33,10 @@ For each story provide:
                 signal_type: { type: 'string', enum: ['launch', 'funding', 'retail', 'expansion', 'celebrity', 'leadership', 'trend'] },
                 headline: { type: 'string' },
                 why_it_matters: { type: 'string' },
-                date: { type: 'string' }
+                date: { type: 'string' },
+                source: { type: 'string' }
               },
-              required: ['brand', 'signal_type', 'headline', 'why_it_matters', 'date'],
+              required: ['brand', 'signal_type', 'headline', 'why_it_matters', 'date', 'source'],
               additionalProperties: false
             }
           }
