@@ -1,5 +1,6 @@
 import { logSafeError } from '@/lib/safe-log'
 import { authorizeRequest } from '@/lib/api-auth'
+import { researchWithOpenAI } from '@/lib/openai-research'
 import { NextRequest, NextResponse } from 'next/server'
 
 export async function POST(request: NextRequest) {
@@ -7,72 +8,44 @@ export async function POST(request: NextRequest) {
   if (auth.error) return auth.error
 
   try {
-    const body = {
-      model: 'claude-sonnet-4-6',
-      max_tokens: 2000,
-      tools: [{
-        type: 'web_search_20250305',
-        name: 'web_search',
-        max_uses: 5
-      }],
-      messages: [{
-        role: 'user',
-        content: `Search for 5 recent beauty industry news stories from the last 30 days. For each story return a JSON object. Respond with a JSON array only — no markdown, no explanation, just the raw JSON array.
+    const result = await researchWithOpenAI<{ signals: Array<{ date?: string }> }>({
+      prompt: `Search for 5 recent beauty industry news stories from the last 30 days. Return current, verifiable stories relevant to outreach for Atelier.
 
-[
-  {
+For each story provide:
+{
     "brand": "brand name",
     "signal_type": "launch | funding | retail | expansion | celebrity | leadership | trend",
     "headline": "one sentence summary",
     "why_it_matters": "why this matters for a GenAI-powered NPD and manufacturing platform serving prestige beauty brands",
     "date": "Month Year"
-  }
-]`
-      }]
-    }
-
-    console.log('[competitor-signals] Sending request to Claude API')
-
-    const res = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': process.env.ANTHROPIC_API_KEY ?? '',
-        'anthropic-version': '2023-06-01'
+}`,
+      schemaName: 'beauty_industry_signals',
+      schema: {
+        type: 'object',
+        properties: {
+          signals: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                brand: { type: 'string' },
+                signal_type: { type: 'string', enum: ['launch', 'funding', 'retail', 'expansion', 'celebrity', 'leadership', 'trend'] },
+                headline: { type: 'string' },
+                why_it_matters: { type: 'string' },
+                date: { type: 'string' }
+              },
+              required: ['brand', 'signal_type', 'headline', 'why_it_matters', 'date'],
+              additionalProperties: false
+            }
+          }
+        },
+        required: ['signals'],
+        additionalProperties: false
       },
-      body: JSON.stringify(body)
+      maxOutputTokens: 2000
     })
 
-    console.log('[competitor-signals] Claude API status:', res.status)
-
-    const data = await res.json()
-    console.log('[competitor-signals] Claude API response:', JSON.stringify(data).slice(0, 500))
-
-    if (!res.ok) {
-      logSafeError('[competitor-signals] API error:', data)
-      return NextResponse.json({ error: 'Claude API error', detail: data }, { status: 500 })
-    }
-
-    const rawText = (data.content ?? [])
-      .filter((b: { type: string }) => b.type === 'text')
-      .map((b: { text: string }) => b.text)
-      .join('')
-
-    console.log('[competitor-signals] Raw text from Claude:', rawText.slice(0, 1000))
-
-    const jsonMatch = rawText.match(/\[[\s\S]*\]/)
-    if (!jsonMatch) {
-      console.warn('[competitor-signals] No JSON array found in response, returning raw text for debugging')
-      return NextResponse.json({ success: false, signals: [], rawText })
-    }
-
-    let signals
-    try {
-      signals = JSON.parse(jsonMatch[0])
-    } catch (parseError) {
-      logSafeError('[competitor-signals] JSON parse error:', parseError)
-      return NextResponse.json({ success: false, signals: [], rawText, parseError: String(parseError) })
-    }
+    const signals = result.data.signals
 
     signals.sort((a: { date?: string }, b: { date?: string }) => {
       const parse = (d?: string) => {
@@ -88,7 +61,6 @@ export async function POST(request: NextRequest) {
       return 0
     })
 
-    console.log('[competitor-signals] Returning', signals.length, 'signals')
     return NextResponse.json({ success: true, signals })
 
   } catch (error) {

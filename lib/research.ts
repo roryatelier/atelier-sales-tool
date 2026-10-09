@@ -1,10 +1,15 @@
-import Anthropic from '@anthropic-ai/sdk'
 import { normaliseBrandName, isVercel, getLocalDb } from './db'
-
-const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
+import { researchWithOpenAI } from './openai-research'
 
 const RATE_PER_MILLION_INPUT = 3.00
 const RATE_PER_MILLION_OUTPUT = 15.00
+
+type ResearchDossier = {
+  score_breakdown?: Record<string, number>
+  icp_score?: number
+  score_band?: string
+  [key: string]: unknown
+}
 
 export async function researchBrand(brandName: string) {
   const normalised = normaliseBrandName(brandName)
@@ -21,21 +26,15 @@ export async function researchBrand(brandName: string) {
 
   const prompt = buildResearchPrompt(brandName)
 
-  const response = await client.messages.create({
-    model: 'claude-sonnet-4-6',
-    max_tokens: 4000,
-    tools: [
-      {
-        type: 'web_search_20250305',
-        name: 'web_search',
-        max_uses: 5
-      } as Parameters<typeof client.messages.create>[0]['tools'] extends Array<infer T> ? T : never
-    ],
-    messages: [{ role: 'user', content: prompt }]
+  const response = await researchWithOpenAI<ResearchDossier>({
+    prompt,
+    schemaName: 'brand_qualification_dossier',
+    schema: BRAND_DOSSIER_SCHEMA,
+    maxOutputTokens: 4000
   })
 
-  const inputTokens = response.usage.input_tokens
-  const outputTokens = response.usage.output_tokens
+  const inputTokens = response.usage.inputTokens
+  const outputTokens = response.usage.outputTokens
   const estimatedCost =
     (inputTokens / 1_000_000) * RATE_PER_MILLION_INPUT +
     (outputTokens / 1_000_000) * RATE_PER_MILLION_OUTPUT
@@ -48,20 +47,7 @@ export async function researchBrand(brandName: string) {
     db.prepare('INSERT INTO usage_log (brand_name, call_type, input_tokens, output_tokens, rate_per_million_input, rate_per_million_output, estimated_cost_usd) VALUES (?, ?, ?, ?, ?, ?, ?)').run(brandName, 'research', inputTokens, outputTokens, RATE_PER_MILLION_INPUT, RATE_PER_MILLION_OUTPUT, estimatedCost)
   }
 
-  const rawText = response.content
-    .filter(block => block.type === 'text')
-    .map(block => (block as { type: 'text'; text: string }).text)
-    .join('')
-
-  const jsonMatch = rawText.match(/\{[\s\S]*\}/)
-  if (!jsonMatch) throw new Error('Claude returned malformed JSON — research failed')
-
-  let dossier
-  try {
-    dossier = JSON.parse(jsonMatch[0])
-  } catch {
-    throw new Error('Claude returned malformed JSON — research failed')
-  }
+  const dossier = response.data
 
   const maxScores: Record<string, number> = {
     annual_revenue: 35,
@@ -93,6 +79,78 @@ export async function researchBrand(brandName: string) {
   }
 
   return dossier
+}
+
+const nullableString = { type: ['string', 'null'] }
+
+const BRAND_DOSSIER_SCHEMA = {
+  type: 'object',
+  properties: {
+    brand_name: { type: 'string' },
+    website: nullableString,
+    revenue_estimate: nullableString,
+    revenue_confidence: { type: 'string', enum: ['high', 'medium', 'low'] },
+    revenue_source: nullableString,
+    retailers: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          name: { type: 'string' },
+          confidence: { type: 'string', enum: ['high', 'medium', 'low'] },
+          source: { type: 'string' }
+        },
+        required: ['name', 'confidence', 'source'],
+        additionalProperties: false
+      }
+    },
+    markets: { type: 'array', items: { type: 'string' } },
+    category: { type: 'string' },
+    sku_count_estimate: nullableString,
+    signals: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          type: { type: 'string' },
+          description: { type: 'string' },
+          source: { type: 'string' }
+        },
+        required: ['type', 'description', 'source'],
+        additionalProperties: false
+      }
+    },
+    icp_score: { type: 'number' },
+    score_breakdown: {
+      type: 'object',
+      properties: {
+        annual_revenue: { type: 'number' },
+        retail_distribution: { type: 'number' },
+        market_presence: { type: 'number' },
+        product_category: { type: 'number' },
+        order_viability: { type: 'number' }
+      },
+      required: ['annual_revenue', 'retail_distribution', 'market_presence', 'product_category', 'order_viability'],
+      additionalProperties: false
+    },
+    score_explanations: {
+      type: 'object',
+      properties: {
+        annual_revenue: { type: 'string' },
+        retail_distribution: { type: 'string' },
+        market_presence: { type: 'string' },
+        product_category: { type: 'string' },
+        order_viability: { type: 'string' }
+      },
+      required: ['annual_revenue', 'retail_distribution', 'market_presence', 'product_category', 'order_viability'],
+      additionalProperties: false
+    },
+    score_band: { type: 'string', enum: ['Hot', 'Warm', 'Watch', 'Pass'] },
+    data_quality: { type: 'string', enum: ['sufficient', 'insufficient'] },
+    competitors: { type: 'array', items: { type: 'string' } }
+  },
+  required: ['brand_name', 'website', 'revenue_estimate', 'revenue_confidence', 'revenue_source', 'retailers', 'markets', 'category', 'sku_count_estimate', 'signals', 'icp_score', 'score_breakdown', 'score_explanations', 'score_band', 'data_quality', 'competitors'],
+  additionalProperties: false
 }
 
 function buildResearchPrompt(brandName: string): string {
