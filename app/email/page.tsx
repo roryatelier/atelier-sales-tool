@@ -847,7 +847,7 @@ export default function EmailPage() {
       const data = await res.json()
 
       if (data.reauth) { setNeedsAuth(true); setShowModal(false); return }
-      if (!res.ok || !data.success) { setError('Failed to send email. Please try again.'); setShowModal(false); return }
+      if (!res.ok || !data.success) { setError(typeof data.error === 'string' ? data.error : 'Failed to send email. Please try again.'); setShowModal(false); return }
 
       setSent(true)
       setPipelineSynced(data.pipeline_synced ?? null)

@@ -10,13 +10,17 @@ const root = path.resolve(__dirname, '..');
 let cookieValues = {};
 let providerCalls = 0;
 let sheetsShouldFail = false;
+let gmailSendErrors = [];
+let gmailSendCalls = 0;
+let refreshCalls = 0;
+let externalFetch = async () => { throw new Error('Unexpected external call'); };
 let tokenData = { access_token: 'test-access' };
 let userData = { id: 'google-1', email: 'member@example.invalid', verified_email: true, name: 'Member', picture: '' };
 let logLines = [];
 const storageValues = new Map();
 const browserStorage = { get length() { return storageValues.size; }, key: i => [...storageValues.keys()][i] ?? null, getItem: key => storageValues.get(key) ?? null, setItem: (key, value) => storageValues.set(key, value), removeItem: key => storageValues.delete(key) };
 const user = { googleSub: 'google-1', email: 'member@example.invalid', name: 'Member', picture: '' };
-const env = { JWT_SECRET: 'test-secret-'.repeat(6), APP_ALLOWED_EMAILS: user.email, NODE_ENV: 'test', CRON_SECRET: 'test-cron' };
+const env = { JWT_SECRET: 'test-secret-'.repeat(6), APP_ALLOWED_EMAILS: user.email, NODE_ENV: 'test', CRON_SECRET: 'test-cron', GMAIL_CLIENT_ID: 'test-client', GMAIL_CLIENT_SECRET: 'test-client-secret' };
 const cache = new Map();
 class MockOAuth {
   async getToken() { providerCalls++; return { tokens: tokenData }; }
@@ -27,7 +31,7 @@ class MockGoogleAuth {}
 const google = {
   auth: { OAuth2: MockOAuth, GoogleAuth: MockGoogleAuth },
   oauth2: () => ({ userinfo: { get: async () => ({ data: userData }) } }),
-  gmail: () => ({ users: { messages: { send: async () => { providerCalls++; return { data: { id: 'test-message-id' } }; } } } }),
+  gmail: () => ({ users: { messages: { send: async () => { providerCalls++; gmailSendCalls++; const error = gmailSendErrors.shift(); if (error) throw error; return { data: { id: 'test-message-id' } }; } } } }),
   sheets: () => ({ spreadsheets: { values: { append: async () => { if (sheetsShouldFail) throw new Error('Sheets unavailable'); } } } }),
 };
 function load(relative) {
@@ -38,7 +42,7 @@ function load(relative) {
   const source = ts.transpileModule(fs.readFileSync(filename, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020, esModuleInterop: true } }).outputText;
   vm.runInNewContext(source, { exports: exported, process: { env }, crypto: globalThis.crypto, TextEncoder, TextDecoder, Uint8Array, Buffer, URL, URLSearchParams, Request, Response, localStorage: browserStorage, window: { addEventListener() {}, removeEventListener() {} },
     console: { error: (...args) => logLines.push(args), log() {}, warn() {} },
-    fetch: async () => { providerCalls++; throw new Error('Unexpected external call'); },
+    fetch: async (...args) => { providerCalls++; refreshCalls++; return externalFetch(...args); },
     require: name => {
       if (name === 'server-only') return {};
       if (name === 'jose') return jose;
@@ -170,6 +174,16 @@ test('safe logging drops bearer tokens, bodies, headers and provider messages', 
   for (const secret of ['test-secret', 'test-bearer', 'test-body']) assert.equal(line.includes(secret), false);
 });
 
+test('Gmail failures are classified without exposing provider details', () => {
+  const { classifyGmailError } = load('lib/gmail.ts');
+  assert.equal(classifyGmailError({ response: { status: 401 } }), 'auth');
+  assert.equal(classifyGmailError({ response: { status: 403, data: { error: { errors: [{ reason: 'insufficientPermissions' }] } } } }), 'permission');
+  assert.equal(classifyGmailError({ response: { status: 403, data: { error: { errors: [{ reason: 'dailyLimitExceeded' }] } } } }), 'quota');
+  assert.equal(classifyGmailError({ response: { status: 429 } }), 'quota');
+  assert.equal(classifyGmailError({ response: { status: 503 } }), 'temporary');
+  assert.equal(classifyGmailError(new Error('recipient rejected')), 'unknown');
+});
+
 test('account-owned browser storage blocks old tabs and clears legacy and foreign drafts', () => {
   storageValues.clear();
   storageValues.set('email_tabs', 'legacy-private-draft');
@@ -226,4 +240,70 @@ test('direct sends reject stale sender identity and invalid headers before Gmail
   assert.equal((await syncedResponse.json()).pipeline_synced, true);
   delete env.GOOGLE_SERVICE_ACCOUNT;
   delete env.GOOGLE_SHEETS_ID;
+});
+
+test('direct sends return safe actionable Gmail failures and only retry explicit authentication rejection', async () => {
+  cookieValues = { atelier_session: await policy.signSession(user), atelier_gmail: await policy.sealGmailCredentials({ ...user, accessToken: 'expired-access', refreshToken: 'test-refresh' }) };
+  const send = load('app/api/send-email/route.ts').POST;
+  const request = () => new NextRequest('https://example.invalid/api/send-email', { method: 'POST', headers: { origin: 'https://example.invalid', 'content-type': 'application/json' }, body: JSON.stringify({ expectedGoogleSub: user.googleSub, to: 'contact@example.invalid', subject: 'Hello', emailBody: 'Body' }) });
+
+  const initialSends = gmailSendCalls;
+  const initialRefreshes = refreshCalls;
+  gmailSendErrors = [Object.assign(new Error('provider secret'), { response: { status: 403, data: { error: { errors: [{ reason: 'insufficientPermissions' }] } } } })];
+  let response = await send(request());
+  assert.equal(response.status, 401);
+  assert.equal((await response.json()).reauth, true);
+  assert.equal(gmailSendCalls, initialSends + 1);
+  assert.equal(refreshCalls, initialRefreshes);
+
+  gmailSendErrors = [Object.assign(new Error('provider secret'), { response: { status: 429 } })];
+  response = await send(request());
+  assert.equal(response.status, 429);
+  assert.equal((await response.json()).error, 'Gmail has temporarily limited sending. Please try again later.');
+  assert.equal(gmailSendCalls, initialSends + 2);
+  assert.equal(refreshCalls, initialRefreshes);
+
+  gmailSendErrors = [Object.assign(new Error('provider secret'), { response: { status: 401 } })];
+  externalFetch = async () => new Response(JSON.stringify({ access_token: 'new-access' }), { status: 200, headers: { 'content-type': 'application/json' } });
+  response = await send(request());
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).message_id, 'test-message-id');
+  assert.equal(gmailSendCalls, initialSends + 4);
+  assert.equal(refreshCalls, initialRefreshes + 1);
+
+  gmailSendErrors = [Object.assign(new Error('expired'), { response: { status: 401 } }), Object.assign(new Error('still expired'), { response: { status: 401 } })];
+  response = await send(request());
+  assert.equal(response.status, 401);
+  assert.equal((await response.json()).reauth, true);
+  assert.equal(gmailSendCalls, initialSends + 6);
+  assert.equal(refreshCalls, initialRefreshes + 2);
+
+  for (const error of [Object.assign(new Error('temporary'), { response: { status: 503 } }), new Error('network failure')]) {
+    const sendsBefore = gmailSendCalls;
+    const refreshesBefore = refreshCalls;
+    gmailSendErrors = [error];
+    response = await send(request());
+    assert.ok([502, 503].includes(response.status));
+    assert.equal(gmailSendCalls, sendsBefore + 1);
+    assert.equal(refreshCalls, refreshesBefore);
+  }
+
+  gmailSendErrors = [new Error('recipient rejected with provider secret')];
+  response = await send(request());
+  assert.equal(response.status, 502);
+  assert.equal((await response.json()).error, 'Gmail did not confirm this send. Check Sent mail before trying again.');
+  assert.equal(JSON.stringify(logLines).includes('provider secret'), false);
+
+  const refreshOnlyCookie = await policy.sealGmailCredentials({ ...user, accessToken: '', refreshToken: 'test-refresh' });
+  cookieValues.atelier_gmail = refreshOnlyCookie;
+  const originalSeal = policy.sealGmailCredentials;
+  policy.sealGmailCredentials = async () => { throw new Error('persistence secret'); };
+  gmailSendErrors = [];
+  response = await send(request());
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).message_id, 'test-message-id');
+  policy.sealGmailCredentials = originalSeal;
+
+  gmailSendErrors = [];
+  externalFetch = async () => { throw new Error('Unexpected external call'); };
 });
