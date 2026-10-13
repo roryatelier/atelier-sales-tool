@@ -56,7 +56,7 @@ export function isGmailAuthError(error: unknown): boolean {
   return classifyGmailError(error) === 'auth'
 }
 
-export type GmailErrorKind = 'auth' | 'permission' | 'quota' | 'temporary' | 'unknown'
+export type GmailErrorKind = 'auth' | 'permission' | 'policy' | 'quota' | 'temporary' | 'unknown'
 
 export function classifyGmailError(error: unknown): GmailErrorKind {
   const value = typeof error === 'object' && error !== null
@@ -72,6 +72,7 @@ export function classifyGmailError(error: unknown): GmailErrorKind {
   const message = typeof value.message === 'string' ? value.message.toLowerCase() : ''
 
   if (status === 401 || message.includes('invalid_grant') || message.includes('invalid credentials')) return 'auth'
+  if (reasons.includes('domainpolicy')) return 'policy'
   if (reasons.some(reason => ['autherror', 'insufficientpermissions', 'forbidden'].includes(reason)) ||
       message.includes('insufficient authentication scope') || message.includes('insufficient permission')) return 'permission'
   if (status === 429 || reasons.some(reason => reason.includes('ratelimit') || reason.includes('dailylimit') || reason.includes('quota'))) return 'quota'

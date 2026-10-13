@@ -138,7 +138,7 @@ async function refreshAccessToken(refreshToken: string): Promise<RefreshResult> 
       if (res.status === 429 || res.status >= 500) return { error: 'temporary' }
       let reason = ''
       try { reason = String((await res.json() as { error?: unknown }).error ?? '') } catch {}
-      return { error: reason === 'invalid_client' || reason === 'unauthorized_client' ? 'configuration' : 'reauth' }
+      return { error: ['invalid_client', 'unauthorized_client', 'deleted_client'].includes(reason) ? 'configuration' : 'reauth' }
     }
     const data = await res.json()
     return typeof data.access_token === 'string' && data.access_token ? { accessToken: data.access_token } : { error: 'temporary' }
@@ -159,8 +159,9 @@ function sendFailure(error: unknown) {
   if (kind === 'auth' || kind === 'permission') {
     return NextResponse.json({ error: 'Gmail access needs to be reconnected before sending.', reauth: true }, { status: 401 })
   }
+  if (kind === 'policy') return NextResponse.json({ error: 'Your Google Workspace administrator has blocked Gmail access for this app.' }, { status: 403 })
   if (kind === 'quota') return NextResponse.json({ error: 'Gmail has temporarily limited sending. Please try again later.' }, { status: 429 })
-  if (kind === 'temporary') return NextResponse.json({ error: 'Gmail is temporarily unavailable. Please try again later.' }, { status: 503 })
+  if (kind === 'temporary') return NextResponse.json({ error: 'Gmail did not confirm this send. Check Sent mail before trying again.' }, { status: 503 })
   return NextResponse.json({ error: 'Gmail did not confirm this send. Check Sent mail before trying again.' }, { status: 502 })
 }
 

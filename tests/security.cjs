@@ -178,6 +178,7 @@ test('Gmail failures are classified without exposing provider details', () => {
   const { classifyGmailError } = load('lib/gmail.ts');
   assert.equal(classifyGmailError({ response: { status: 401 } }), 'auth');
   assert.equal(classifyGmailError({ response: { status: 403, data: { error: { errors: [{ reason: 'insufficientPermissions' }] } } } }), 'permission');
+  assert.equal(classifyGmailError({ response: { status: 403, data: { error: { errors: [{ reason: 'domainPolicy' }] } } } }), 'policy');
   assert.equal(classifyGmailError({ response: { status: 403, data: { error: { errors: [{ reason: 'dailyLimitExceeded' }] } } } }), 'quota');
   assert.equal(classifyGmailError({ response: { status: 429 } }), 'quota');
   assert.equal(classifyGmailError({ response: { status: 503 } }), 'temporary');
@@ -263,19 +264,25 @@ test('direct sends return safe actionable Gmail failures and only retry explicit
   assert.equal(gmailSendCalls, initialSends + 2);
   assert.equal(refreshCalls, initialRefreshes);
 
+  gmailSendErrors = [Object.assign(new Error('provider secret'), { response: { status: 403, data: { error: { errors: [{ reason: 'domainPolicy' }] } } } })];
+  response = await send(request());
+  assert.equal(response.status, 403);
+  assert.equal((await response.json()).error, 'Your Google Workspace administrator has blocked Gmail access for this app.');
+  assert.equal(refreshCalls, initialRefreshes);
+
   gmailSendErrors = [Object.assign(new Error('provider secret'), { response: { status: 401 } })];
   externalFetch = async () => new Response(JSON.stringify({ access_token: 'new-access' }), { status: 200, headers: { 'content-type': 'application/json' } });
   response = await send(request());
   assert.equal(response.status, 200);
   assert.equal((await response.json()).message_id, 'test-message-id');
-  assert.equal(gmailSendCalls, initialSends + 4);
+  assert.equal(gmailSendCalls, initialSends + 5);
   assert.equal(refreshCalls, initialRefreshes + 1);
 
   gmailSendErrors = [Object.assign(new Error('expired'), { response: { status: 401 } }), Object.assign(new Error('still expired'), { response: { status: 401 } })];
   response = await send(request());
   assert.equal(response.status, 401);
   assert.equal((await response.json()).reauth, true);
-  assert.equal(gmailSendCalls, initialSends + 6);
+  assert.equal(gmailSendCalls, initialSends + 7);
   assert.equal(refreshCalls, initialRefreshes + 2);
 
   for (const error of [Object.assign(new Error('temporary'), { response: { status: 503 } }), new Error('network failure')]) {
@@ -284,6 +291,7 @@ test('direct sends return safe actionable Gmail failures and only retry explicit
     gmailSendErrors = [error];
     response = await send(request());
     assert.ok([502, 503].includes(response.status));
+    assert.equal((await response.json()).error, 'Gmail did not confirm this send. Check Sent mail before trying again.');
     assert.equal(gmailSendCalls, sendsBefore + 1);
     assert.equal(refreshCalls, refreshesBefore);
   }
@@ -296,6 +304,14 @@ test('direct sends return safe actionable Gmail failures and only retry explicit
 
   const refreshOnlyCookie = await policy.sealGmailCredentials({ ...user, accessToken: '', refreshToken: 'test-refresh' });
   cookieValues.atelier_gmail = refreshOnlyCookie;
+  externalFetch = async () => new Response(JSON.stringify({ error: 'deleted_client' }), { status: 400, headers: { 'content-type': 'application/json' } });
+  const sendsBeforeDeletedClient = gmailSendCalls;
+  response = await send(request());
+  assert.equal(response.status, 503);
+  assert.equal((await response.json()).error, 'Gmail is not configured correctly. Contact an administrator.');
+  assert.equal(gmailSendCalls, sendsBeforeDeletedClient);
+
+  externalFetch = async () => new Response(JSON.stringify({ access_token: 'new-access' }), { status: 200, headers: { 'content-type': 'application/json' } });
   const originalSeal = policy.sealGmailCredentials;
   policy.sealGmailCredentials = async () => { throw new Error('persistence secret'); };
   gmailSendErrors = [];
