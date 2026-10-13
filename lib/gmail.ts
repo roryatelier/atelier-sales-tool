@@ -53,9 +53,29 @@ export async function sendViaGmail(accessToken: string, raw: string): Promise<st
 }
 
 export function isGmailAuthError(error: unknown): boolean {
-  return error instanceof Error && (
-    error.message.includes('invalid_grant') ||
-    error.message.includes('Invalid Credentials') ||
-    error.message.includes('401')
-  )
+  return classifyGmailError(error) === 'auth'
+}
+
+export type GmailErrorKind = 'auth' | 'permission' | 'policy' | 'quota' | 'temporary' | 'unknown'
+
+export function classifyGmailError(error: unknown): GmailErrorKind {
+  const value = typeof error === 'object' && error !== null
+    ? error as { status?: unknown; code?: unknown; message?: unknown; response?: { status?: unknown; data?: unknown } }
+    : {}
+  const status = typeof value.status === 'number' ? value.status
+    : typeof value.code === 'number' ? value.code
+    : typeof value.response?.status === 'number' ? value.response.status : undefined
+  const data = typeof value.response?.data === 'object' && value.response.data !== null
+    ? value.response.data as { error?: { errors?: Array<{ reason?: unknown }> } }
+    : undefined
+  const reasons = data?.error?.errors?.map(item => typeof item.reason === 'string' ? item.reason.toLowerCase() : '') ?? []
+  const message = typeof value.message === 'string' ? value.message.toLowerCase() : ''
+
+  if (status === 401 || message.includes('invalid_grant') || message.includes('invalid credentials')) return 'auth'
+  if (reasons.includes('domainpolicy')) return 'policy'
+  if (reasons.some(reason => ['autherror', 'insufficientpermissions', 'forbidden'].includes(reason)) ||
+      message.includes('insufficient authentication scope') || message.includes('insufficient permission')) return 'permission'
+  if (status === 429 || reasons.some(reason => reason.includes('ratelimit') || reason.includes('dailylimit') || reason.includes('quota'))) return 'quota'
+  if (typeof status === 'number' && status >= 500) return 'temporary'
+  return 'unknown'
 }

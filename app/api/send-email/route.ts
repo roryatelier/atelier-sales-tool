@@ -4,6 +4,8 @@ import { appendPipelineRow } from '@/lib/sheets'
 import { authorizeRequest } from '@/lib/api-auth'
 import { NextRequest, NextResponse } from 'next/server'
 import { google } from 'googleapis'
+import { classifyGmailError } from '@/lib/gmail'
+import { logSafeError } from '@/lib/safe-log'
 
 const REDIRECT_URI = process.env.PRODUCTION_URL
   ? `${process.env.PRODUCTION_URL}/api/auth/callback`
@@ -117,7 +119,10 @@ function makeEmailBody(to: string, subject: string, body: string, attachments?: 
   return toBase64Url(Buffer.from(parts.join('\r\n')))
 }
 
-async function refreshAccessToken(refreshToken: string): Promise<string | null> {
+type RefreshResult = { accessToken: string } | { error: 'reauth' | 'temporary' | 'configuration' }
+
+async function refreshAccessToken(refreshToken: string): Promise<RefreshResult> {
+  if (!process.env.GMAIL_CLIENT_ID || !process.env.GMAIL_CLIENT_SECRET) return { error: 'configuration' }
   try {
     const res = await fetch('https://oauth2.googleapis.com/token', {
       method: 'POST',
@@ -129,20 +134,35 @@ async function refreshAccessToken(refreshToken: string): Promise<string | null> 
         grant_type: 'refresh_token',
       }),
     })
-    if (!res.ok) return null
+    if (!res.ok) {
+      if (res.status === 429 || res.status >= 500) return { error: 'temporary' }
+      let reason = ''
+      try { reason = String((await res.json() as { error?: unknown }).error ?? '') } catch {}
+      return { error: ['invalid_client', 'unauthorized_client', 'deleted_client'].includes(reason) ? 'configuration' : 'reauth' }
+    }
     const data = await res.json()
-    return (data.access_token as string) ?? null
+    return typeof data.access_token === 'string' && data.access_token ? { accessToken: data.access_token } : { error: 'temporary' }
   } catch {
-    return null
+    return { error: 'temporary' }
   }
 }
 
-function isAuthError(error: unknown): boolean {
-  return error instanceof Error && (
-    error.message.includes('invalid_grant') ||
-    error.message.includes('Invalid Credentials') ||
-    error.message.includes('401')
-  )
+function refreshFailure(result: Exclude<RefreshResult, { accessToken: string }>) {
+  if (result.error === 'reauth') return NextResponse.json({ error: 'Gmail session expired — reconnect Gmail', reauth: true }, { status: 401 })
+  if (result.error === 'configuration') return NextResponse.json({ error: 'Gmail is not configured correctly. Contact an administrator.' }, { status: 503 })
+  return NextResponse.json({ error: 'Gmail is temporarily unavailable. Please try again later.' }, { status: 503 })
+}
+
+function sendFailure(error: unknown) {
+  const kind = classifyGmailError(error)
+  logSafeError('Gmail send failed', error)
+  if (kind === 'auth' || kind === 'permission') {
+    return NextResponse.json({ error: 'Gmail access needs to be reconnected before sending.', reauth: true }, { status: 401 })
+  }
+  if (kind === 'policy') return NextResponse.json({ error: 'Your Google Workspace administrator has blocked Gmail access for this app.' }, { status: 403 })
+  if (kind === 'quota') return NextResponse.json({ error: 'Gmail has temporarily limited sending. Please try again later.' }, { status: 429 })
+  if (kind === 'temporary') return NextResponse.json({ error: 'Gmail did not confirm this send. Check Sent mail before trying again.' }, { status: 503 })
+  return NextResponse.json({ error: 'Gmail did not confirm this send. Check Sent mail before trying again.' }, { status: 502 })
 }
 
 async function gmailSend(accessToken: string, raw: string): Promise<string> {
@@ -203,32 +223,28 @@ export async function POST(request: NextRequest) {
 
     // If no access token but refresh token exists, refresh before first attempt
     if (!accessToken) {
-      newAccessToken = await refreshAccessToken(refreshToken!)
-      if (!newAccessToken) {
-        return NextResponse.json(
-          { error: 'Gmail session expired — re-authorise Gmail', reauth: true },
-          { status: 401 }
-        )
-      }
-      accessToken = newAccessToken
+      const refreshed = await refreshAccessToken(refreshToken!)
+      if ('error' in refreshed) return refreshFailure(refreshed)
+      newAccessToken = refreshed.accessToken
+      accessToken = refreshed.accessToken
     }
 
     let messageId: string
     try {
       messageId = await gmailSend(accessToken, raw)
     } catch (sendError) {
-      if (isAuthError(sendError) && refreshToken) {
+      if (classifyGmailError(sendError) === 'auth' && refreshToken) {
         // Token expired mid-session — refresh and retry once
-        newAccessToken = await refreshAccessToken(refreshToken)
-        if (!newAccessToken) {
-          return NextResponse.json(
-            { error: 'Gmail session expired — re-authorise Gmail', reauth: true },
-            { status: 401 }
-          )
+        const refreshed = await refreshAccessToken(refreshToken)
+        if ('error' in refreshed) return refreshFailure(refreshed)
+        newAccessToken = refreshed.accessToken
+        try {
+          messageId = await gmailSend(newAccessToken, raw)
+        } catch (retryError) {
+          return sendFailure(retryError)
         }
-        messageId = await gmailSend(newAccessToken, raw)
       } else {
-        throw sendError
+        return sendFailure(sendError)
       }
     }
 
@@ -286,30 +302,24 @@ export async function POST(request: NextRequest) {
 
     // Persist the refreshed token so subsequent requests don't need to refresh again
     if (newAccessToken) {
-      response.cookies.set('atelier_gmail', await sealGmailCredentials({ ...credentials!, accessToken: newAccessToken }), {
-        httpOnly: true,
-        secure: process.env.NODE_ENV === 'production',
-        sameSite: 'lax',
-        maxAge: 60 * 60 * 24 * 30,
-        path: '/',
-      })
+      try {
+        response.cookies.set('atelier_gmail', await sealGmailCredentials({ ...credentials!, accessToken: newAccessToken }), {
+          httpOnly: true,
+          secure: process.env.NODE_ENV === 'production',
+          sameSite: 'lax',
+          maxAge: 60 * 60 * 24 * 30,
+          path: '/',
+        })
+      } catch (error) {
+        // Gmail already accepted the message. Never turn this into a send failure.
+        logSafeError('Gmail credential persistence failed after send', error)
+      }
     }
 
     return response
 
   } catch (error: unknown) {
-    console.error('Send email failed')
-
-    if (isAuthError(error)) {
-      return NextResponse.json(
-        { error: 'Gmail session expired — re-authorise Gmail', reauth: true },
-        { status: 401 }
-      )
-    }
-
-    return NextResponse.json(
-      { error: 'Failed to send email' },
-      { status: 500 }
-    )
+    logSafeError('Send email request failed', error)
+    return NextResponse.json({ error: 'The email request could not be completed. Please try again.' }, { status: 500 })
   }
 }
