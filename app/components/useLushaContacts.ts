@@ -3,6 +3,8 @@ import { useRef, useState, useEffect, useCallback } from 'react'
 import { activeStorageOwner, matchesDraftIdentity } from '@/lib/browser-storage'
 import { mergeContacts, validContactEmail, type LushaContact, type RevealedEmail } from '@/lib/lusha-contact'
 
+interface CompanyMatch { id: string; name: string; domain: string }
+
 export function useLushaContacts(knownContact?: {contactId?: string;email:string} | null) {
   const [contacts, setContacts] = useState<LushaContact[]>([])
   const [domain, setDomain] = useState('')
@@ -12,24 +14,25 @@ export function useLushaContacts(knownContact?: {contactId?: string;email:string
   const [revealing, setRevealing] = useState<string[]>([])
   const [revealErrors, setRevealErrors] = useState<Record<string,string>>({})
   const [choices, setChoices] = useState<Record<string,RevealedEmail[]>>({})
+  const [companyChoices, setCompanyChoices] = useState<CompanyMatch[]>([])
   const generation = useRef(0)
-  const query = useRef({ domain: '', owner: '', fingerprint: '' })
+  const query = useRef({ domain: '', companyName: '', companyId: '', owner: '', fingerprint: '' })
   const busy = useRef(false)
   const revealBusy = useRef(new Set<string>())
   useEffect(() => () => { generation.current++ }, [])
 
   const reset = useCallback(() => {
     generation.current++; busy.current = false; revealBusy.current.clear()
-    setContacts([]); setNextPage(null); setLoading(false); setRevealing([]); setChoices({}); setRevealErrors({}); setError('')
+    setContacts([]); setNextPage(null); setLoading(false); setRevealing([]); setChoices({}); setCompanyChoices([]); setRevealErrors({}); setError('')
   }, [])
   const knownId = knownContact?.contactId, knownEmail = knownContact?.email
-  const search = useCallback(async (value: string, page = 0) => {
+  const search = useCallback(async (value: string, page = 0, companyName = '', companyId = '') => {
     if (page > 0 && busy.current) return
     if (page === 0) {
       const sameDomain = value === query.current.domain
       generation.current++
-      query.current = { domain: value, owner: activeStorageOwner() ?? '', fingerprint: '' }
-      setDomain(value); if (!sameDomain) setContacts([]); setNextPage(null); setChoices({}); setRevealErrors({}); setRevealing([]); revealBusy.current.clear()
+      query.current = { domain: value, companyName, companyId, owner: activeStorageOwner() ?? '', fingerprint: '' }
+      setDomain(value); if (!sameDomain || companyId) setContacts([]); setNextPage(null); setChoices({}); setCompanyChoices([]); setRevealErrors({}); setRevealing([]); revealBusy.current.clear()
     }
     const version = generation.current
     const owner = query.current.owner
@@ -37,10 +40,14 @@ export function useLushaContacts(knownContact?: {contactId?: string;email:string
     if (!current()) return
     busy.current = true; setLoading(true); setError('')
     try {
-      const res = await fetch('/api/lookup-contacts', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({action:'search',domain:query.current.domain,page}) })
+      const res = await fetch('/api/lookup-contacts', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({action:'search',domain:query.current.domain,company_name:query.current.companyName,company_id:query.current.companyId || undefined,page}) })
       const data = await res.json()
       if (!current()) return
+      if (data.status === 'company_choice_required' && Array.isArray(data.companies)) {
+        setCompanyChoices(data.companies); setError(''); return
+      }
       if (!res.ok || !data.success) { setError(data.error ?? 'Contact lookup failed.'); return }
+      if (typeof data.companyId === 'string' && data.companyId) query.current.companyId = data.companyId
       const fingerprint = data.contacts.map((c: LushaContact) => c.contactId).join('|')
       const repeated = page > 0 && fingerprint === query.current.fingerprint
       query.current.fingerprint = fingerprint
@@ -51,6 +58,9 @@ export function useLushaContacts(knownContact?: {contactId?: string;email:string
     } catch { if (current()) setError('Contact lookup could not complete. Try again.') }
     finally { if (current()) { busy.current = false; setLoading(false) } }
   }, [knownId,knownEmail])
+  function chooseCompany(company: CompanyMatch) {
+    void search(query.current.domain, 0, query.current.companyName, company.id)
+  }
   async function reveal(contact: LushaContact) {
     if (contact.email || choices[contact.contactId]?.length || revealBusy.current.has(contact.contactId)) return
     const version = generation.current, owner = query.current.owner
@@ -74,5 +84,5 @@ export function useLushaContacts(knownContact?: {contactId?: string;email:string
     setContacts(old => old.map(c => c.contactId === contactId ? {...c,email,verified:false} : c))
     setChoices(old => ({...old,[contactId]:[]})); setRevealErrors(old => ({...old,[contactId]:''})); return true
   }
-  return { reset,contacts,domain,setDomain,error,loading,nextPage,search,reveal,chooseEmail,revealing,revealErrors,choices }
+  return { reset,contacts,domain,setDomain,error,loading,nextPage,search,companyChoices,chooseCompany,reveal,chooseEmail,revealing,revealErrors,choices }
 }

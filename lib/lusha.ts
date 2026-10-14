@@ -4,6 +4,11 @@ import { validContactEmail, type LushaContact, type RevealedEmail } from './lush
 export class LushaError extends Error {
   constructor(public code: string, public httpStatus: number, message: string) { super(message) }
 }
+export interface LushaCompanyMatch {
+  id: string
+  name: string
+  domain: string
+}
 export function normalizeDomain(value: unknown): string {
   if (typeof value !== 'string' || !value.trim()) throw new LushaError('invalid_domain', 400, 'Enter the company website or domain.')
   try {
@@ -18,7 +23,7 @@ async function provider(path: string, body: unknown, paid: boolean): Promise<Rec
   if (!key) throw new LushaError('configuration', 503, 'Contact lookup is not configured. Ask an administrator.')
   let response: Response
   try {
-    response = await fetch('https://api.lusha.com/v3/contacts/' + path, { method: 'POST', cache: 'no-store', signal: AbortSignal.timeout(15000), headers: { 'Content-Type': 'application/json', api_key: key }, body: JSON.stringify(body) })
+    response = await fetch('https://api.lusha.com/v3/' + path, { method: 'POST', cache: 'no-store', signal: AbortSignal.timeout(15000), headers: { 'Content-Type': 'application/json', api_key: key }, body: JSON.stringify(body) })
   } catch { throw new LushaError(paid ? 'ambiguous' : 'failed', 504, paid ? 'Reveal outcome is unknown. Another attempt may use credits again; enter an address manually or check Lusha before retrying.' : 'Contact lookup could not complete. Try again.') }
   if (!response.ok) {
     if (response.status === 402) throw new LushaError('needs_credits', 409, 'Lusha credits are exhausted. Ask an administrator.')
@@ -28,8 +33,24 @@ async function provider(path: string, body: unknown, paid: boolean): Promise<Rec
   }
   try { const data = await response.json(); if (!data || typeof data !== 'object' || Array.isArray(data)) throw Error(); return data } catch { throw new LushaError(paid ? 'ambiguous' : 'failed', 502, 'Lusha returned an invalid response. Do not repeat a paid reveal automatically.') }
 }
-export async function searchContacts(domain: string, page: number, size: number) {
-  const data = await provider('prospecting', { pagination: { page, size }, filters: { companies: { include: { domains: [domain] } } }, options: { includePartialProfiles: true } }, false)
+export async function resolveCompanies(name: string, domain: string): Promise<LushaCompanyMatch[]> {
+  const companies = [
+    ...(name.trim() ? [{ clientReferenceId: 'name', name: name.trim() }] : []),
+    { clientReferenceId: 'domain', domain },
+  ]
+  const data = await provider('companies/search', { companies, options: { includePartialProfiles: true } }, false)
+  if (!Array.isArray(data.results)) throw new LushaError('failed', 502, 'Lusha returned an invalid company list.')
+  const matches = new Map<string, LushaCompanyMatch>()
+  for (const value of data.results as Record<string, unknown>[]) {
+    if (!value || typeof value.id !== 'string' || !value.id || typeof value.name !== 'string') continue
+    const match = { id: value.id, name: value.name, domain: typeof value.domain === 'string' ? value.domain.replace(/^www\./, '') : '' }
+    matches.set(match.id, match)
+  }
+  return [...matches.values()]
+}
+export async function searchContacts(domain: string, page: number, size: number, companyId?: string) {
+  const companyFilter = companyId ? { ids: [companyId] } : { domains: [domain] }
+  const data = await provider('contacts/prospecting', { pagination: { page, size }, filters: { companies: { include: companyFilter } }, options: { includePartialProfiles: true } }, false)
   if (['OUT_OF_CREDITS','PARTIAL_OUT_OF_CREDITS'].includes(data.status as string)) throw new LushaError('needs_credits',409,'Lusha credits are unavailable. Ask an administrator.')
   if (!Array.isArray(data.results)) throw new LushaError('failed', 502, 'Lusha returned an invalid contact list.')
   const contacts: LushaContact[] = data.results.map((value: Record<string, unknown>) => {
@@ -40,10 +61,10 @@ export async function searchContacts(domain: string, page: number, size: number)
   const meta = data.pagination as { total?: number; totalGuaranteed?: boolean } | undefined
   const total = typeof meta?.total === 'number' && Number.isFinite(meta.total) && meta.total >= 0 ? meta.total : undefined
   const hasMore = contacts.length > 0 && page < 1000 && (meta?.totalGuaranteed === true && total !== undefined ? (page + 1) * size < total : true)
-  return { success: true, status: contacts.length ? 'complete' : 'empty', contacts, page, nextPage: hasMore ? page + 1 : null, hasMore, total, totalGuaranteed: meta?.totalGuaranteed === true, domain }
+  return { success: true, status: contacts.length ? 'complete' : 'empty', contacts, page, nextPage: hasMore ? page + 1 : null, hasMore, total, totalGuaranteed: meta?.totalGuaranteed === true, domain, companyId }
 }
 export async function revealContact(id: string) {
-  const data = await provider('enrich', { ids: [id], reveal: ['emails'], waterfallEnabled: false }, true)
+  const data = await provider('contacts/enrich', { ids: [id], reveal: ['emails'], waterfallEnabled: false }, true)
   const contact = Array.isArray(data.results) ? data.results.find((v: { id?: string }) => v?.id === id) : undefined
   const emails: RevealedEmail[] = Array.isArray(contact?.emails) ? contact.emails.filter((v: RevealedEmail) => v && typeof v.email === 'string' && validContactEmail(v.email)).map((v: RevealedEmail) => ({ email: v.email, type: ['work','private'].includes(v.type) ? v.type : 'unknown', ...(typeof v.confidence === 'string' ? { confidence: v.confidence } : {}) })) : []
   const work = emails.find(v => v.type === 'work')

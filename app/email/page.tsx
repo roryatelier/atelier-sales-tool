@@ -452,7 +452,7 @@ export default function EmailPage() {
 
   async function fetchAllContacts() {
     if (!dossier) return
-    void lookup.search((dossier as {website?: string}).website ?? '')
+    void lookup.search((dossier as {website?: string}).website ?? '', 0, dossier.brand_name)
     try {
       const historyRes = await fetch(`/api/contact-history?brand_name=${encodeURIComponent(dossier.brand_name as string)}`)
       const historyData = await historyRes.json()
@@ -1110,11 +1110,21 @@ export default function EmailPage() {
               borderRadius: 'var(--radius-md)', boxShadow: 'var(--shadow-400)',
               minWidth: 280, zIndex: 50, maxHeight: 360, overflowY: 'auto'
             }}>
-              <form onSubmit={e => {e.preventDefault(); void lookup.search(lookup.domain)}} style={{padding:12}}>
+              <form onSubmit={e => {e.preventDefault(); void lookup.search(lookup.domain,0,dossier.brand_name)}} style={{padding:12}}>
                 <input aria-label="Company domain" value={lookup.domain} onChange={e => lookup.setDomain(e.target.value)} placeholder="Company website or domain" />
                 <button type="submit" className="btn btn-secondary btn-sm">Search contacts</button>
               </form>
               {lookup.error && <p role="alert" style={{padding:12}}>{lookup.error}</p>}
+              {lookup.companyChoices.length > 0 && (
+                <div role="alert" style={{padding:12}}>
+                  <div style={{fontSize:12,fontWeight:500,marginBottom:8}}>Choose the matching Lusha company</div>
+                  {lookup.companyChoices.map(company => (
+                    <button key={company.id} className="btn btn-secondary btn-sm" style={{display:'block',width:'100%',marginBottom:6}} onClick={() => lookup.chooseCompany(company)}>
+                      {company.name}{company.domain ? ` · ${company.domain}` : ''}
+                    </button>
+                  ))}
+                </div>
+              )}
               <p style={{padding:12}}>{allContacts.length} contacts loaded</p>
               {lookup.nextPage !== null && <button className="btn btn-secondary btn-sm" disabled={loadingContacts} onClick={() => lookup.search(lookup.domain,lookup.nextPage!)}>Load more</button>}
               {loadingContacts && (
@@ -1122,7 +1132,7 @@ export default function EmailPage() {
                   <div className="spinner" /> Loading contacts...
                 </div>
               )}
-              {!loadingContacts && !lookup.error && allContacts.length === 0 && (
+              {!loadingContacts && !lookup.error && lookup.companyChoices.length === 0 && allContacts.length === 0 && (
                 <div style={{ padding: '12px 16px', fontSize: 13, color: 'var(--slate-400)' }}>No contacts found</div>
               )}
               {!loadingContacts && allContacts.map((c, i) => {

@@ -1,5 +1,5 @@
 import { authorizeRequest } from '@/lib/api-auth'
-import { LushaError, normalizeDomain, revealContact, searchContacts } from '@/lib/lusha'
+import { LushaError, normalizeDomain, resolveCompanies, revealContact, searchContacts } from '@/lib/lusha'
 import { NextRequest, NextResponse } from 'next/server'
 
 export async function POST(request: NextRequest) {
@@ -20,7 +20,16 @@ export async function POST(request: NextRequest) {
     }
     const page = body.page ?? 0, size = body.size ?? 50
     if (!Number.isInteger(page) || page < 0 || page > 1000 || !Number.isInteger(size) || size < 10 || size > 100) throw new LushaError('invalid_input',400,'Invalid contact page or size.')
-    return json(await searchContacts(normalizeDomain(body.domain), page, size))
+    const domain = normalizeDomain(body.domain)
+    const companyId = typeof body.company_id === 'string' && body.company_id.trim() && body.company_id.length <= 256 ? body.company_id.trim() : undefined
+    if (body.company_id !== undefined && !companyId) throw new LushaError('invalid_input',400,'Choose a valid company.')
+    if (!companyId && page === 0) {
+      const companyName = typeof body.company_name === 'string' && body.company_name.length <= 200 ? body.company_name.trim() : ''
+      const companies = await resolveCompanies(companyName, domain)
+      if (companies.length > 1) return json({ success: false, status: 'company_choice_required', error: 'Choose the company record that matches this brand.', companies, domain },409)
+      if (companies.length === 1) return json(await searchContacts(domain, page, size, companies[0].id))
+    }
+    return json(await searchContacts(domain, page, size, companyId))
   } catch (error) {
     if (error instanceof LushaError) return json({ success:false,status:error.code,error:error.message },error.httpStatus)
     return json({ success:false,status:'failed',error:'Contact lookup failed.' },502)

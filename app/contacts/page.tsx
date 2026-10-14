@@ -41,7 +41,7 @@ export default function ContactsPage() {
   const router = useRouter()
 
   const fetchContacts = useCallback(async (brandName: string, website?: string) => {
-    void searchContacts(website ?? '')
+    void searchContacts(website ?? '', 0, brandName)
     try {
       const historyRes = await fetch(`/api/contact-history?brand_name=${encodeURIComponent(brandName)}`)
       const historyData = await historyRes.json()
@@ -183,11 +183,25 @@ export default function ContactsPage() {
       </div>
       <p className="page-sub" style={{ marginBottom: 16 }}>Select a contact to generate an outreach email or log a phone call.</p>
 
-      <form onClick={e => e.stopPropagation()} onSubmit={e => {e.preventDefault(); setSelectedContact(null); setCustomizeContact(null); void lookup.search(lookup.domain)}} style={{display:'flex',gap:8,marginBottom:12}}>
+      <form onClick={e => e.stopPropagation()} onSubmit={e => {e.preventDefault(); setSelectedContact(null); setCustomizeContact(null); void lookup.search(lookup.domain,0,dossier.brand_name)}} style={{display:'flex',gap:8,marginBottom:12}}>
         <input aria-label="Company domain" value={lookup.domain} onChange={e => lookup.setDomain(e.target.value)} placeholder="Company website or domain" />
         <button type="submit" className="btn btn-secondary btn-sm">Search contacts</button>
       </form>
       {lookup.error && <p role="alert">{lookup.error}</p>}
+      {lookup.companyChoices.length > 0 && (
+        <div className="data-warning" role="alert" style={{marginBottom:16}}>
+          <div>
+            <div style={{fontWeight:500,marginBottom:8}}>Choose the matching Lusha company</div>
+            <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
+              {lookup.companyChoices.map(company => (
+                <button key={company.id} className="btn btn-secondary btn-sm" onClick={() => lookup.chooseCompany(company)}>
+                  {company.name}{company.domain ? ` · ${company.domain}` : ''}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
       <p>{contacts.length} contacts loaded</p>
       {lookup.nextPage !== null && <button className="btn btn-secondary btn-sm" disabled={loading} onClick={e => {e.stopPropagation(); void lookup.search(lookup.domain,lookup.nextPage!)}}>Load more</button>}
       <div style={{ position: 'relative', marginBottom: 24 }}>
@@ -313,7 +327,7 @@ export default function ContactsPage() {
         </div>
       )}
 
-      {!loading && !lookup.error && contacts.length === 0 && (
+      {!loading && !lookup.error && lookup.companyChoices.length === 0 && contacts.length === 0 && (
         <div className="data-warning" style={{ marginBottom: 24 }}>
           <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24" style={{ flexShrink: 0 }}>
             <circle cx="12" cy="12" r="10" strokeWidth="2"/>
