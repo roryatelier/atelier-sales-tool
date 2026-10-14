@@ -5,13 +5,13 @@ const path = require('node:path');
 const vm = require('node:vm');
 const ts = require('typescript');
 const { NextRequest, NextResponse } = require('next/server');
-function setup({ key = 'synthetic-key', status = 200, data = {}, denied = false, timeout = false } = {}) {
+function setup({ key = 'synthetic-key', status = 200, data = {}, companyData = { results: [{ id: 'company-1', name: 'Example', domain: 'example.invalid' }] }, denied = false, timeout = false } = {}) {
   const calls = []; const cache = new Map();
   function load(file) {
     if (cache.has(file)) return cache.get(file);
     const exports = {}; cache.set(file, exports);
     const source = ts.transpileModule(fs.readFileSync(path.join(__dirname, '..', file), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020, esModuleInterop: true } }).outputText;
-    vm.runInNewContext(source, { exports, process: { env: { LUSHA_API_KEY: key } }, URL, AbortSignal, Response, console: { error() {} }, fetch: async (url, options) => { calls.push({ url, options, body: JSON.parse(options.body) }); if (timeout) throw Error('private provider details'); return new Response(JSON.stringify(data), { status }); }, require: name => {
+    vm.runInNewContext(source, { exports, process: { env: { LUSHA_API_KEY: key } }, URL, AbortSignal, Response, console: { error() {} }, fetch: async (url, options) => { calls.push({ url, options, body: JSON.parse(options.body) }); if (timeout) throw Error('private provider details'); return new Response(JSON.stringify(String(url).endsWith('/companies/search') ? companyData : data), { status }); }, require: name => {
       if (name === 'server-only') return {};
       if (name === 'next/server') return { NextRequest, NextResponse };
       if (name === '@/lib/api-auth') return { authorizeRequest: async () => denied ? { error: NextResponse.json({ error: 'Authentication required' }, { status: 401 }) } : { session: { googleSub: 'owner-A' } } };
@@ -29,12 +29,38 @@ const reveal = { enrich_id: 'contact-1', expectedGoogleSub: 'owner-A' };
 test('search starts at zero with supported uncapped params and safe domain', async () => {
   const s = setup({ data: { results: [{ id: '1', firstName: 'Test', jobTitle: {} }], pagination: { page: 0, size: 50, total: 101, totalGuaranteed: true } } });
   const res = await s.request(search); const body = await res.json();
-  assert.equal(res.status, 200); assert.equal(s.calls[0].body.pagination.page, 0);
-  assert.equal(s.calls[0].body.options.maxContactsPerCompany, undefined);
-  assert.equal(s.calls[0].body.filters.companies.include.domains[0], 'example.invalid');
+  const contactCall=s.calls.find(call=>call.url.endsWith('/contacts/prospecting'));
+  assert.equal(res.status, 200); assert.equal(contactCall.body.pagination.page, 0);
+  assert.equal(contactCall.body.options.maxContactsPerCompany, undefined);
+  assert.equal(contactCall.body.filters.companies.include.domains[0], 'example.invalid');
   assert.equal(body.hasMore, true); assert.equal(body.nextPage, 1);
   assert.match(res.headers.get('cache-control'), /no-store/);
 });
+test('different name and domain matches require an explicit canonical company choice', async () => {
+  const s=setup({data:{results:[],pagination:{page:0,size:50,total:0,totalGuaranteed:true}},companyData:{results:[{id:'parent',name:'Example Group',domain:'careers.example.invalid'},{id:'retail',name:'Example Retail',domain:'example.invalid'}]}})
+  const res=await s.request({...search,company_name:'Example'});const body=await res.json()
+  assert.equal(res.status,409);assert.equal(body.status,'company_choice_required');assert.equal(body.companies.length,2)
+  assert.equal(s.calls.filter(call=>call.url.endsWith('/contacts/prospecting')).length,1)
+  const chosen=await s.request({...search,company_name:'Example',company_id:'parent'});assert.equal(chosen.status,200)
+  const contactCall=s.calls.find(call=>call.url.endsWith('/contacts/prospecting')&&call.body.filters.companies.include.ids)
+  assert.equal(contactCall.body.filters.companies.include.ids[0],'parent')
+})
+test('company name can resolve contacts when a dossier has no website', async () => {
+  const s=setup({data:{results:[],pagination:{page:0,size:50,total:0,totalGuaranteed:true}}})
+  const res=await s.request({company_name:'Example',domain:'',page:0});const body=await res.json();assert.equal(res.status,409)
+  assert.equal(body.status,'company_choice_required')
+  assert.equal(s.calls[0].body.companies[0].name,'Example')
+  assert.equal(s.calls[0].body.companies.length,1)
+  assert.equal(s.calls.filter(call=>call.url.endsWith('/contacts/prospecting')).length,0)
+})
+test('canonical lookup is deferred until direct domain search returns no contacts', async () => {
+  const s=setup({data:{results:[],pagination:{page:0,size:50,total:0,totalGuaranteed:true}}})
+  const res=await s.request({...search,company_name:'Example'});const body=await res.json()
+  assert.equal(res.status,409);assert.equal(body.status,'company_choice_required')
+  assert.equal(s.calls[0].url.endsWith('/contacts/prospecting'),true)
+  assert.equal(s.calls[1].url.endsWith('/companies/search'),true)
+  assert.equal(s.calls[1].body.companies.length,1)
+})
 test('no-match, missing config, provider failures never fabricate success', async () => {
   for (const [options, expected] of [[{key:''},503],[{status:402},409],[{status:429},429],[{status:401},502],[{status:500},502]]) {
     const s = setup(options); const res = await s.request(search);
