@@ -45,6 +45,13 @@ test('different name and domain matches require an explicit canonical company ch
   const contactCall=s.calls.find(call=>call.url.endsWith('/contacts/prospecting'))
   assert.equal(contactCall.body.filters.companies.include.ids[0],'parent')
 })
+test('company name can resolve contacts when a dossier has no website', async () => {
+  const s=setup({data:{results:[],pagination:{page:0,size:50,total:0,totalGuaranteed:true}}})
+  const res=await s.request({company_name:'Example',domain:'',page:0});assert.equal(res.status,200)
+  assert.equal(s.calls[0].body.companies[0].name,'Example')
+  assert.equal(s.calls[0].body.companies.length,1)
+  assert.equal(s.calls[1].body.filters.companies.include.ids[0],'company-1')
+})
 test('no-match, missing config, provider failures never fabricate success', async () => {
   for (const [options, expected] of [[{key:''},503],[{status:402},409],[{status:429},429],[{status:401},502],[{status:500},502]]) {
     const s = setup(options); const res = await s.request(search);

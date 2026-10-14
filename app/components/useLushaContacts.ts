@@ -29,10 +29,9 @@ export function useLushaContacts(knownContact?: {contactId?: string;email:string
   const search = useCallback(async (value: string, page = 0, companyName = '', companyId = '') => {
     if (page > 0 && busy.current) return
     if (page === 0) {
-      const sameDomain = value === query.current.domain
       generation.current++
       query.current = { domain: value, companyName, companyId, owner: activeStorageOwner() ?? '', fingerprint: '' }
-      setDomain(value); if (!sameDomain || companyId) setContacts([]); setNextPage(null); setChoices({}); setCompanyChoices([]); setRevealErrors({}); setRevealing([]); revealBusy.current.clear()
+      setDomain(value); setContacts([]); setNextPage(null); setChoices({}); setCompanyChoices([]); setRevealErrors({}); setRevealing([]); revealBusy.current.clear()
     }
     const version = generation.current
     const owner = query.current.owner

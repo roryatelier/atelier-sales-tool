@@ -33,11 +33,12 @@ async function provider(path: string, body: unknown, paid: boolean): Promise<Rec
   }
   try { const data = await response.json(); if (!data || typeof data !== 'object' || Array.isArray(data)) throw Error(); return data } catch { throw new LushaError(paid ? 'ambiguous' : 'failed', 502, 'Lusha returned an invalid response. Do not repeat a paid reveal automatically.') }
 }
-export async function resolveCompanies(name: string, domain: string): Promise<LushaCompanyMatch[]> {
+export async function resolveCompanies(name: string, domain?: string): Promise<LushaCompanyMatch[]> {
   const companies = [
     ...(name.trim() ? [{ clientReferenceId: 'name', name: name.trim() }] : []),
-    { clientReferenceId: 'domain', domain },
+    ...(domain ? [{ clientReferenceId: 'domain', domain }] : []),
   ]
+  if (!companies.length) throw new LushaError('invalid_input', 400, 'Enter a company name or domain.')
   const data = await provider('companies/search', { companies, options: { includePartialProfiles: true } }, false)
   if (!Array.isArray(data.results)) throw new LushaError('failed', 502, 'Lusha returned an invalid company list.')
   const matches = new Map<string, LushaCompanyMatch>()
