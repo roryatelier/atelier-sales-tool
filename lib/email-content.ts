@@ -8,6 +8,7 @@ export interface EmailTemplateContent {
   subject: string
   body: string
   target_role: string
+  source?: string
 }
 
 export interface DraftEmailContent {
@@ -17,6 +18,33 @@ export interface DraftEmailContent {
 }
 
 const RECOVERY_MIGRATION = 'outreach_templates_2026_09_v1'
+const REVIEW_FIX_MIGRATION = 'outreach_templates_2026_09_v2_review_fixes'
+
+const FOLLOW_UP_FIXES = [
+  {
+    name: 'Brand follow-up',
+    before: "I've attached an introduction deck for your reference. It shows how Atelier helps beauty brands expand capacity and bring more products to market faster and more efficiently, without internal resource drain or incremental headcount.",
+    after: 'I wanted to share a little more context: Atelier helps beauty brands expand capacity and bring more products to market faster and more efficiently, without internal resource drain or incremental headcount.'
+  },
+  {
+    name: 'Retailer follow-up',
+    before: "I've attached an introduction deck for your reference. It shows how Atelier helps retailers expand capacity, scale own-brand innovation and bring products to market faster, without internal resource drain or incremental headcount.",
+    after: 'I wanted to share a little more context: Atelier helps retailers expand capacity, scale own-brand innovation and bring products to market faster, without internal resource drain or incremental headcount.'
+  }
+]
+
+const TEMPLATE_ROLE_ALIASES: Partial<Record<CanonicalEmailRole, string[]>> = {
+  COO: ['VP Operations'],
+  CMO: ['VP Marketing', 'Head of Marketing'],
+  'Head of NPD': ['VP Product']
+}
+
+export function chooseTemplate(rows: EmailTemplateContent[], canonicalRole: CanonicalEmailRole): EmailTemplateContent | null {
+  const acceptedRoles = new Set([canonicalRole, ...(TEMPLATE_ROLE_ALIASES[canonicalRole] ?? [])])
+  return rows.find(template => acceptedRoles.has(template.target_role as CanonicalEmailRole))
+    ?? rows.find(template => template.target_role === '')
+    ?? null
+}
 
 // Recovered from the company-owned “Outreach Templates” Google Doc, last updated 16 September 2026.
 export const DEFAULT_EMAIL_GUIDANCE = `Always open with a genuine, specific reason for reaching out, such as a launch, acquisition, campaign, retail expansion, hiring signal, or recent role change.
@@ -175,7 +203,7 @@ Best,
 
 Kindly following up on my previous note.
 
-I've attached an introduction deck for your reference. It shows how Atelier helps beauty brands expand capacity and bring more products to market faster and more efficiently, without internal resource drain or incremental headcount.
+I wanted to share a little more context: Atelier helps beauty brands expand capacity and bring more products to market faster and more efficiently, without internal resource drain or incremental headcount.
 
 Would you be open to a quick call next week to explore how Atelier could support [Brand]'s growth and innovation goals?
 
@@ -191,7 +219,7 @@ Thanks,
 
 Kindly following up on my previous note.
 
-I've attached an introduction deck for your reference. It shows how Atelier helps retailers expand capacity, scale own-brand innovation and bring products to market faster, without internal resource drain or incremental headcount.
+I wanted to share a little more context: Atelier helps retailers expand capacity, scale own-brand innovation and bring products to market faster, without internal resource drain or incremental headcount.
 
 Would you be open to a quick call next week to explore how Atelier could support [Retailer]'s private-label innovation priorities?
 
@@ -211,11 +239,21 @@ async function seedPostgresContent() {
       await client.query('INSERT INTO email_guidance (id, content) VALUES (1, $1) ON CONFLICT (id) DO NOTHING', [DEFAULT_EMAIL_GUIDANCE])
       for (const template of RECOVERED_EMAIL_TEMPLATES) {
         await client.query(
-          'INSERT INTO templates (name, role, subject, body, target_role) VALUES ($1, $2, $3, $4, $5)',
+          "INSERT INTO templates (name, role, subject, body, target_role, source) VALUES ($1, $2, $3, $4, $5, 'recovered')",
           [template.name, template.role, template.subject, template.body, template.target_role]
         )
       }
       await client.query('INSERT INTO content_migrations (key) VALUES ($1)', [RECOVERY_MIGRATION])
+    }
+    const reviewFix = await client.query('SELECT key FROM content_migrations WHERE key = $1', [REVIEW_FIX_MIGRATION])
+    if (reviewFix.rowCount === 0) {
+      for (const template of RECOVERED_EMAIL_TEMPLATES) {
+        await client.query("UPDATE templates SET source = 'recovered' WHERE name = $1", [template.name])
+      }
+      for (const fix of FOLLOW_UP_FIXES) {
+        await client.query('UPDATE templates SET body = REPLACE(body, $1, $2), updated_at = NOW() WHERE name = $3 AND body LIKE $4', [fix.before, fix.after, fix.name, `%${fix.before}%`])
+      }
+      await client.query('INSERT INTO content_migrations (key) VALUES ($1)', [REVIEW_FIX_MIGRATION])
     }
     await client.query('COMMIT')
   } catch (error) {
@@ -230,13 +268,24 @@ function seedSqliteContent() {
   const db = getLocalDb()
   const seed = db.transaction(() => {
     const existing = db.prepare('SELECT key FROM content_migrations WHERE key = ?').get(RECOVERY_MIGRATION)
-    if (existing) return
-    db.prepare('INSERT OR IGNORE INTO email_guidance (id, content) VALUES (1, ?)').run(DEFAULT_EMAIL_GUIDANCE)
-    const insert = db.prepare('INSERT INTO templates (name, role, subject, body, target_role) VALUES (?, ?, ?, ?, ?)')
-    for (const template of RECOVERED_EMAIL_TEMPLATES) {
-      insert.run(template.name, template.role, template.subject, template.body, template.target_role)
+    if (!existing) {
+      db.prepare('INSERT OR IGNORE INTO email_guidance (id, content) VALUES (1, ?)').run(DEFAULT_EMAIL_GUIDANCE)
+      const insert = db.prepare("INSERT INTO templates (name, role, subject, body, target_role, source) VALUES (?, ?, ?, ?, ?, 'recovered')")
+      for (const template of RECOVERED_EMAIL_TEMPLATES) {
+        insert.run(template.name, template.role, template.subject, template.body, template.target_role)
+      }
+      db.prepare('INSERT INTO content_migrations (key) VALUES (?)').run(RECOVERY_MIGRATION)
     }
-    db.prepare('INSERT INTO content_migrations (key) VALUES (?)').run(RECOVERY_MIGRATION)
+    const reviewFix = db.prepare('SELECT key FROM content_migrations WHERE key = ?').get(REVIEW_FIX_MIGRATION)
+    if (!reviewFix) {
+      for (const template of RECOVERED_EMAIL_TEMPLATES) {
+        db.prepare("UPDATE templates SET source = 'recovered' WHERE name = ?").run(template.name)
+      }
+      for (const fix of FOLLOW_UP_FIXES) {
+        db.prepare("UPDATE templates SET body = REPLACE(body, ?, ?), updated_at = datetime('now') WHERE name = ? AND body LIKE ?").run(fix.before, fix.after, fix.name, `%${fix.before}%`)
+      }
+      db.prepare('INSERT INTO content_migrations (key) VALUES (?)').run(REVIEW_FIX_MIGRATION)
+    }
   })
   seed()
   db.close()
@@ -282,28 +331,26 @@ export async function getDraftEmailContent(role: string, followUp: boolean): Pro
     const { sql } = await import('@vercel/postgres')
     const guidanceResult = await sql`SELECT content FROM email_guidance WHERE id = 1`
     const templateResult = await sql`
-      SELECT id, name, role, subject, body, target_role
+      SELECT id, name, role, subject, body, target_role, source
       FROM templates
-      WHERE role = ${templateType} AND (target_role = ${canonicalRole} OR target_role = '')
-      ORDER BY CASE WHEN target_role = ${canonicalRole} THEN 0 ELSE 1 END, updated_at DESC
-      LIMIT 1
+      WHERE role = ${templateType}
+      ORDER BY CASE WHEN source = 'recovered' THEN 1 ELSE 0 END, updated_at DESC
     `
     return {
       canonicalRole,
       guidance: String(guidanceResult.rows[0]?.content ?? DEFAULT_EMAIL_GUIDANCE),
-      template: (templateResult.rows[0] as EmailTemplateContent | undefined) ?? null
+      template: chooseTemplate(templateResult.rows as EmailTemplateContent[], canonicalRole)
     }
   }
 
   const db = getLocalDb()
   const guidance = db.prepare('SELECT content FROM email_guidance WHERE id = 1').get() as { content?: string } | undefined
-  const template = db.prepare(`
-    SELECT id, name, role, subject, body, target_role
+  const templates = db.prepare(`
+    SELECT id, name, role, subject, body, target_role, source
     FROM templates
-    WHERE role = ? AND (target_role = ? OR target_role = '')
-    ORDER BY CASE WHEN target_role = ? THEN 0 ELSE 1 END, updated_at DESC
-    LIMIT 1
-  `).get(templateType, canonicalRole, canonicalRole) as EmailTemplateContent | undefined
+    WHERE role = ?
+    ORDER BY CASE WHEN source = 'recovered' THEN 1 ELSE 0 END, updated_at DESC
+  `).all(templateType) as EmailTemplateContent[]
   db.close()
-  return { canonicalRole, guidance: guidance?.content ?? DEFAULT_EMAIL_GUIDANCE, template: template ?? null }
+  return { canonicalRole, guidance: guidance?.content ?? DEFAULT_EMAIL_GUIDANCE, template: chooseTemplate(templates, canonicalRole) }
 }
