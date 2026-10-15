@@ -101,8 +101,15 @@ export default function PortfolioPage() {
 
   const typing = search.trim().length > 0
 
+  const visibleDossiers = dossiers
+    .filter(d => !typing || d.brand_name.toLowerCase().includes(search.trim().toLowerCase()))
+
+  const dossierNames = new Set(dossiers.map(d => d.brand_name.toLowerCase()))
   const visibleSaved = savedBrands
-    .filter(s => !typing || s.brand_name.toLowerCase().includes(search.toLowerCase()))
+    .filter(s => !dossierNames.has(s.brand_name.toLowerCase()))
+    .filter(s => !typing || s.brand_name.toLowerCase().includes(search.trim().toLowerCase()))
+
+  const visibleBrandCount = visibleDossiers.length + visibleSaved.length
 
   const exactMatch = dossiers.some(
     d => d.brand_name.toLowerCase() === search.trim().toLowerCase()
@@ -309,7 +316,7 @@ export default function PortfolioPage() {
               Saved
             </span>
             <span style={{ fontSize: 11, color: 'var(--slate-400)', marginLeft: 2 }}>
-              {visibleSaved.length}
+              {visibleBrandCount}
             </span>
           </div>
 
@@ -343,11 +350,46 @@ export default function PortfolioPage() {
               </div>
             )}
 
-            {!loading && visibleSaved.length === 0 && !showResearch && (
+            {!loading && visibleBrandCount === 0 && !showResearch && (
               <div style={{ padding: '32px 16px', textAlign: 'center', fontSize: 12, color: 'var(--slate-400)' }}>
                 {typing ? 'No saved brands match your search' : 'No saved brands yet'}
               </div>
             )}
+
+            {visibleDossiers.map(d => {
+              const active = selected === d.brand_name
+              return (
+                <div
+                  key={`dossier-${d.brand_name}`}
+                  onClick={() => pickDossier(d)}
+                  style={{
+                    padding: '10px 16px 10px 14px',
+                    borderBottom: '0.5px solid var(--black-100)',
+                    cursor: 'pointer',
+                    background: active ? 'rgba(5,8,73,0.04)' : 'transparent',
+                    borderLeft: active ? '2px solid #050849' : '2px solid transparent',
+                    display: 'flex', alignItems: 'center', gap: 10,
+                  }}
+                >
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{
+                      fontSize: 13, fontWeight: active ? 600 : 400,
+                      color: 'var(--text-default)',
+                      whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                    }}>
+                      {d.brand_name}
+                    </div>
+                    <div style={{
+                      fontSize: 11, color: 'var(--slate-400)', marginTop: 1,
+                      whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                    }}>
+                      {d.category.split(/[,(]/)[0].trim()}
+                    </div>
+                  </div>
+                  <Chip band={d.score_band} />
+                </div>
+              )
+            })}
 
             {visibleSaved.map((s, i) => {
               const active = selected === s.brand_name
