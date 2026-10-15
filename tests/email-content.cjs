@@ -23,6 +23,7 @@ test('real prospect titles map to the intended outreach group', () => {
     'Chief Marketing Officer': 'CMO',
     'Vice President of Marketing': 'CMO',
     'Director of Marketing': 'CMO',
+    'Director of Product Marketing': 'CMO',
     'Global Brand Director': 'CMO',
     'Founder & CEO': 'CEO',
     'Managing Director': 'CEO',
@@ -60,6 +61,12 @@ test('user templates and legacy role labels take priority over recovered default
   ]
   assert.equal(content.chooseTemplate(templates, 'CMO').name, 'User VP Marketing')
   assert.equal(content.chooseTemplate(templates, 'CFO').name, 'Recovered general')
+
+  const generalOverride = [
+    { name: 'User general', role: 'Cold Outreach', subject: 'User', body: 'User', target_role: '', source: 'user' },
+    { name: 'Recovered CFO', role: 'Cold Outreach', subject: 'Recovered', body: 'Recovered', target_role: 'CFO', source: 'recovered' }
+  ]
+  assert.equal(content.chooseTemplate(generalOverride, 'CFO').name, 'User general')
 })
 
 test('manual templates override automatic recovery and unknown titles do not receive CEO messaging', () => {
@@ -81,6 +88,7 @@ test('template recovery is a one-time migration so user edits and deletions pers
   assert.match(source, /BEGIN/)
   assert.match(source, /COMMIT/)
   assert.match(source, /source = 'recovered'/)
+  assert.match(source, /name = \$1 AND role = \$2 AND subject = \$3 AND target_role = \$4/)
   assert.doesNotMatch(source, /COUNT\(\*\).*templates/is)
 })
 
