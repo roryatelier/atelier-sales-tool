@@ -29,10 +29,7 @@ const STAKEHOLDER_ROLES = [
   'CFO',
   'COO',
   'CMO',
-  'VP Product',
-  'VP Operations',
   'Head of NPD',
-  'Head of Marketing',
   'Retailer'
 ]
 

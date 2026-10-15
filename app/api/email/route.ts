@@ -55,10 +55,15 @@ const MESSAGE_MATRIX: Record<string, { focus: string; proofPoints: string }> = {
 function buildEmailPrompt(dossier: Record<string, unknown>, role: string, canonicalRole: string, contactName: string, guidance: string, template?: { subject: string; body: string }, pitchBullet?: string, followUp?: { original_subject?: string; contact_name?: string; date_sent?: string }, senderName?: string): string {
   const matrix = MESSAGE_MATRIX[canonicalRole] ?? MESSAGE_MATRIX.General
   const retailers = (dossier.retailers as { name: string }[])?.map(r => r.name).join(', ') ?? 'Unknown'
-  const signals = (dossier.signals as { type: string; description: string }[])
-    ?.slice(0, 3)
+  const verifiedSignals = (dossier.signals as { type: string; description: string }[] | undefined)?.slice(0, 3) ?? []
+  const signals = verifiedSignals
     .map(s => s.type + ': ' + s.description.replace(/\*\*/g, ''))
-    .join('\n') ?? ''
+    .join('\n')
+  const signalRule = verifiedSignals.length === 0
+    ? 'No verified brand signals were supplied. Do not invent a launch, acquisition, campaign, expansion, hiring event, role change, or other recent event. Use only the verified brand details above.'
+    : verifiedSignals.length === 1
+      ? 'Use the single verified signal supplied below. Do not invent or imply a second signal.'
+      : 'Use one or two of the verified signals supplied below. Do not invent additional events.'
 
   const atelierDesc = "Atelier's GenAI platform streamlines the end-to-end NPD and manufacturing process, leveraging 8.5M+ supply chain permutations to match product specs with perfectly aligned manufacturer capabilities. For a single unit cost, brands receive finished product delivered directly into their DC, ready to sell."
 
@@ -78,11 +83,13 @@ function buildEmailPrompt(dossier: Record<string, unknown>, role: string, canoni
       'Brand: ' + dossier.brand_name + '\n' +
       'Revenue (estimated): ' + (dossier.revenue_estimate ?? 'Unknown') + '\n' +
       'Retail presence: ' + retailers + '\n\n' +
-      'BRAND SIGNALS (weave at least two into the email)\n' +
-      signals + '\n\n' +
+      'VERIFIED BRAND SIGNALS\n' +
+      (signals || 'None supplied') + '\n\n' +
+      'SIGNAL RULE\n' + signalRule + '\n\n' +
       (pitchBullet ? 'PRIORITY TALKING POINT — weave this specific point naturally into the email:\n"' + pitchBullet + '"\n\n' : '') +
+      (followUp ? 'FOLLOW-UP CONTEXT — the original email was sent on ' + (followUp.date_sent ?? 'a few days ago') + ' with subject "' + (followUp.original_subject ?? 'our previous email') + '". Reference that outreach briefly and add a new useful angle instead of repeating it. Do not claim an attachment is included unless one is actually provided separately by the sender.\n\n' : '') +
       'INSTRUCTIONS\n' +
-      'Rewrite the template above for this specific brand and contact. Keep the same tone, structure, and length as the template — do not add or remove paragraphs, do not change the style. Replace any generic placeholders with real brand-specific facts from the signals above. Open with a specific buying signal from the brand. Address the recipient by first name. End with a soft CTA asking for a call. You MUST mention the brand name ' + dossier.brand_name + ' at least once in the email body.\n' +
+      'Rewrite the template above for this specific brand and contact. Keep the same tone, structure, and length as the template — do not add or remove paragraphs, do not change the style. Replace generic placeholders only with verified facts supplied above. Address the recipient by first name. End with a soft CTA asking for a call. You MUST mention the brand name ' + dossier.brand_name + ' at least once in the email body.\n' +
       (senderName ? 'Sign off with "Thanks," or "Best," followed by the sender\'s name: ' + senderName + '. Do not include a position or title.' : 'Sign off with just "Thanks," with no name.') + '\n\n' +
       'OUTPUT FORMAT\n' +
       'Return valid JSON only. No preamble, no markdown fences. Begin with { and end with }.\n' +
@@ -101,15 +108,16 @@ function buildEmailPrompt(dossier: Record<string, unknown>, role: string, canoni
     'Brand: ' + dossier.brand_name + '\n' +
     'Revenue (estimated): ' + (dossier.revenue_estimate ?? 'Unknown') + '\n' +
     'Retail presence: ' + retailers + '\n\n' +
-    'BRAND SIGNALS (open with the strongest one as the reason for reaching out)\n' +
-    signals + '\n\n' +
+    'VERIFIED BRAND SIGNALS\n' +
+    (signals || 'None supplied') + '\n\n' +
+    'SIGNAL RULE\n' + signalRule + '\n\n' +
     'ROLE-SPECIFIC FOCUS\n' +
     'This executive\'s primary concern is: ' + matrix.focus + '\n' +
     'Use the most relevant 1-2 proof points from: ' + matrix.proofPoints + '\n\n' +
     (pitchBullet ? 'PRIORITY TALKING POINT — weave this specific point naturally into the email:\n"' + pitchBullet + '"\n\n' : '') +
     (followUp ? 'FOLLOW-UP CONTEXT — this is a follow-up email. The original email was sent on ' + (followUp.date_sent ?? 'a few days ago') + ' with subject "' + (followUp.original_subject ?? 'our previous email') + '". Do NOT repeat the same pitch. Reference the previous outreach briefly and offer a new angle or insight.\n\n' : '') +
     'EMAIL WRITING RULES:\n' +
-    '1. Open with a specific buying signal — a recent launch, acquisition, campaign, retail expansion, or role change. Make it feel like you\'ve done your homework.\n' +
+    '1. Follow the SIGNAL RULE above. When verified signals exist, use the strongest as the reason for reaching out.\n' +
     '2. Tailor the message to the recipient\'s role — speak to what they care about: ' + matrix.focus + '\n' +
     '3. Weave in 1-2 relevant proof points naturally.\n' +
     '4. Address recipient by first name.\n' +
