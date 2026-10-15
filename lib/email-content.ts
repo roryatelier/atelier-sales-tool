@@ -41,7 +41,10 @@ const TEMPLATE_ROLE_ALIASES: Partial<Record<CanonicalEmailRole, string[]>> = {
 
 export function chooseTemplate(rows: EmailTemplateContent[], canonicalRole: CanonicalEmailRole): EmailTemplateContent | null {
   const acceptedRoles = new Set([canonicalRole, ...(TEMPLATE_ROLE_ALIASES[canonicalRole] ?? [])])
-  return rows.find(template => acceptedRoles.has(template.target_role as CanonicalEmailRole))
+  const isUserTemplate = (template: EmailTemplateContent) => template.source !== 'recovered'
+  return rows.find(template => isUserTemplate(template) && acceptedRoles.has(template.target_role as CanonicalEmailRole))
+    ?? rows.find(template => isUserTemplate(template) && template.target_role === '')
+    ?? rows.find(template => acceptedRoles.has(template.target_role as CanonicalEmailRole))
     ?? rows.find(template => template.target_role === '')
     ?? null
 }
@@ -248,7 +251,10 @@ async function seedPostgresContent() {
     const reviewFix = await client.query('SELECT key FROM content_migrations WHERE key = $1', [REVIEW_FIX_MIGRATION])
     if (reviewFix.rowCount === 0) {
       for (const template of RECOVERED_EMAIL_TEMPLATES) {
-        await client.query("UPDATE templates SET source = 'recovered' WHERE name = $1", [template.name])
+        await client.query(
+          "UPDATE templates SET source = 'recovered' WHERE name = $1 AND role = $2 AND subject = $3 AND target_role = $4",
+          [template.name, template.role, template.subject, template.target_role]
+        )
       }
       for (const fix of FOLLOW_UP_FIXES) {
         await client.query('UPDATE templates SET body = REPLACE(body, $1, $2), updated_at = NOW() WHERE name = $3 AND body LIKE $4', [fix.before, fix.after, fix.name, `%${fix.before}%`])
@@ -279,7 +285,7 @@ function seedSqliteContent() {
     const reviewFix = db.prepare('SELECT key FROM content_migrations WHERE key = ?').get(REVIEW_FIX_MIGRATION)
     if (!reviewFix) {
       for (const template of RECOVERED_EMAIL_TEMPLATES) {
-        db.prepare("UPDATE templates SET source = 'recovered' WHERE name = ?").run(template.name)
+        db.prepare("UPDATE templates SET source = 'recovered' WHERE name = ? AND role = ? AND subject = ? AND target_role = ?").run(template.name, template.role, template.subject, template.target_role)
       }
       for (const fix of FOLLOW_UP_FIXES) {
         db.prepare("UPDATE templates SET body = REPLACE(body, ?, ?), updated_at = datetime('now') WHERE name = ? AND body LIKE ?").run(fix.before, fix.after, fix.name, `%${fix.before}%`)
