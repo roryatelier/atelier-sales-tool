@@ -16,6 +16,7 @@ module.exports = function loadTypeScript(entry, globals = {}) {
     }).outputText
     const localRequire = request => {
       if (request === 'server-only') return {}
+      if (request.startsWith('@/')) return load(path.resolve(__dirname, '..', request.slice(2)))
       if (request.startsWith('.')) return load(path.resolve(path.dirname(resolved), request))
       return require(request)
     }

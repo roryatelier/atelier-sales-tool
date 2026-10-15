@@ -32,7 +32,8 @@ const STAKEHOLDER_ROLES = [
   'VP Product',
   'VP Operations',
   'Head of NPD',
-  'Head of Marketing'
+  'Head of Marketing',
+  'Retailer'
 ]
 
 export default function TemplatesPage() {
@@ -48,10 +49,14 @@ export default function TemplatesPage() {
   const [formTargetRole, setFormTargetRole] = useState('General')
   const [formSubject, setFormSubject] = useState('')
   const [formBody, setFormBody] = useState('')
+  const [guidance, setGuidance] = useState('')
+  const [savedGuidance, setSavedGuidance] = useState('')
+  const [savingGuidance, setSavingGuidance] = useState(false)
+  const [guidanceError, setGuidanceError] = useState('')
 
   useEffect(() => {
     document.title = 'Templates — Atelier'
-    fetchTemplates()
+    void fetchTemplates().then(fetchGuidance)
   }, [])
 
   async function fetchTemplates() {
@@ -63,6 +68,39 @@ export default function TemplatesPage() {
       console.error('Failed to fetch templates')
     } finally {
       setLoading(false)
+    }
+  }
+
+  async function fetchGuidance() {
+    try {
+      const res = await fetch('/api/email-guidance')
+      const data = await res.json()
+      if (!res.ok || !data.success) throw new Error('Guidance unavailable')
+      setGuidance(data.guidance)
+      setSavedGuidance(data.guidance)
+    } catch {
+      setGuidanceError('Email guidance could not be loaded. Refresh and try again.')
+    }
+  }
+
+  async function saveGuidance() {
+    if (!guidance.trim() || guidance === savedGuidance) return
+    setSavingGuidance(true)
+    setGuidanceError('')
+    try {
+      const res = await fetch('/api/email-guidance', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ guidance })
+      })
+      const data = await res.json()
+      if (!res.ok || !data.success) throw new Error('Guidance update failed')
+      setSavedGuidance(guidance.trim())
+      setGuidance(guidance.trim())
+    } catch {
+      setGuidanceError('Email guidance could not be saved. Your changes remain in this editor.')
+    } finally {
+      setSavingGuidance(false)
     }
   }
 
@@ -145,7 +183,31 @@ export default function TemplatesPage() {
           + New template
         </button>
       </div>
-      <p className="page-sub" style={{ marginBottom: 32 }}>Save and reuse outreach emails. One template can be used across any stakeholder role.</p>
+      <p className="page-sub" style={{ marginBottom: 24 }}>Edit the guidance and role-based templates used by the email generator.</p>
+
+      <div className="card" style={{ marginBottom: 24 }}>
+        <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 24, marginBottom: 12 }}>
+          <div>
+            <div className="section-label" style={{ marginBottom: 6 }}>Email guidance</div>
+            <div style={{ color: 'var(--slate-400)', fontSize: 13 }}>Applied to every generated email. Role templates below supply the structure and examples.</div>
+          </div>
+          <button
+            onClick={saveGuidance}
+            disabled={savingGuidance || !guidance.trim() || guidance === savedGuidance}
+            className="btn btn-primary btn-sm"
+          >
+            {savingGuidance ? 'Saving...' : guidance === savedGuidance ? 'Saved' : 'Save guidance'}
+          </button>
+        </div>
+        <textarea
+          value={guidance}
+          onChange={event => setGuidance(event.target.value)}
+          rows={8}
+          className="textarea"
+          aria-label="Email generator guidance"
+        />
+        {guidanceError && <div style={{ color: 'var(--red-400)', fontSize: 12, marginTop: 8 }}>{guidanceError}</div>}
+      </div>
 
       {showForm && (
         <div className="card" style={{ marginBottom: 24 }}>

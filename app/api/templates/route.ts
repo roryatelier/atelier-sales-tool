@@ -2,13 +2,14 @@ import { logSafeError } from '@/lib/safe-log'
 import { authorizeRequest } from '@/lib/api-auth'
 import { NextRequest, NextResponse } from 'next/server'
 import { initialiseDb, isVercel, getLocalDb } from '@/lib/db'
+import { ensureRecoveredEmailContent } from '@/lib/email-content'
 
 export async function GET(request: Request) {
   const auth = await authorizeRequest(request)
   if (auth.error) return auth.error
 
   try {
-    await initialiseDb()
+    await ensureRecoveredEmailContent()
     if (isVercel) {
       const { sql } = await import('@vercel/postgres')
       const result = await sql`SELECT * FROM templates ORDER BY created_at DESC`

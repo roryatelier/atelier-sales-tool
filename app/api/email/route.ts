@@ -1,9 +1,15 @@
 import { logSafeError } from '@/lib/safe-log'
 import { authorizeRequest } from '@/lib/api-auth'
+import { DEFAULT_EMAIL_GUIDANCE, getDraftEmailContent, type EmailTemplateContent } from '@/lib/email-content'
+import { canonicaliseEmailRole } from '@/lib/email-role'
 import { generateEmailWithOpenAI, generatePitchWithOpenAI, type OpenAIUsage } from '@/lib/openai-email'
 import { NextRequest, NextResponse } from 'next/server'
 
 const MESSAGE_MATRIX: Record<string, { focus: string; proofPoints: string }> = {
+  General: {
+    focus: 'Growth, innovation capacity, and bringing products to market efficiently',
+    proofPoints: 'Launch products 6x faster, increase product output by 10x, reduce the cost of innovation to near $0'
+  },
   CFO: {
     focus: 'Cost reduction, margin improvement, and unit economics',
     proofPoints: '2x operating profit margins, reduce the cost of innovation to near $0'
@@ -39,11 +45,15 @@ const MESSAGE_MATRIX: Record<string, { focus: string; proofPoints: string }> = {
   'Head of Marketing': {
     focus: 'Campaign-led product launches and speed to market',
     proofPoints: 'Launch products 6x faster, increase product output by 10x'
+  },
+  Retailer: {
+    focus: 'Private-label innovation, category growth, and expanding capacity without additional headcount',
+    proofPoints: 'Launch products 6x faster, increase product output by 10x, deliver finished product directly into distribution centres'
   }
 }
 
-function buildEmailPrompt(dossier: Record<string, unknown>, role: string, contactName: string, template?: { subject: string; body: string }, pitchBullet?: string, followUp?: { original_subject?: string; contact_name?: string; date_sent?: string }, senderName?: string): string {
-  const matrix = MESSAGE_MATRIX[role] ?? MESSAGE_MATRIX['CEO']
+function buildEmailPrompt(dossier: Record<string, unknown>, role: string, canonicalRole: string, contactName: string, guidance: string, template?: { subject: string; body: string }, pitchBullet?: string, followUp?: { original_subject?: string; contact_name?: string; date_sent?: string }, senderName?: string): string {
+  const matrix = MESSAGE_MATRIX[canonicalRole] ?? MESSAGE_MATRIX.General
   const retailers = (dossier.retailers as { name: string }[])?.map(r => r.name).join(', ') ?? 'Unknown'
   const signals = (dossier.signals as { type: string; description: string }[])
     ?.slice(0, 3)
@@ -56,12 +66,15 @@ function buildEmailPrompt(dossier: Record<string, unknown>, role: string, contac
     return 'You are personalising a saved email template for a specific brand and contact on behalf of Atelier.\n\n' +
       'ABOUT ATELIER\n' +
       atelierDesc + '\n\n' +
+      'EDITABLE OUTREACH GUIDANCE\n' +
+      guidance + '\n\n' +
       'SAVED TEMPLATE TO USE AS STYLE GUIDE:\n' +
       'Subject: ' + template.subject + '\n' +
       'Body:\n' + template.body + '\n\n' +
       'RECIPIENT\n' +
       'Name: ' + contactName + '\n' +
       'Role: ' + role + '\n' +
+      'Role group: ' + canonicalRole + '\n' +
       'Brand: ' + dossier.brand_name + '\n' +
       'Revenue (estimated): ' + (dossier.revenue_estimate ?? 'Unknown') + '\n' +
       'Retail presence: ' + retailers + '\n\n' +
@@ -79,9 +92,12 @@ function buildEmailPrompt(dossier: Record<string, unknown>, role: string, contac
   return 'You are writing a cold outreach email on behalf of Atelier.\n\n' +
     'ABOUT ATELIER\n' +
     atelierDesc + '\n\n' +
+    'EDITABLE OUTREACH GUIDANCE\n' +
+    guidance + '\n\n' +
     'RECIPIENT\n' +
     'Name: ' + contactName + '\n' +
     'Role: ' + role + '\n' +
+    'Role group: ' + canonicalRole + '\n' +
     'Brand: ' + dossier.brand_name + '\n' +
     'Revenue (estimated): ' + (dossier.revenue_estimate ?? 'Unknown') + '\n' +
     'Retail presence: ' + retailers + '\n\n' +
@@ -169,7 +185,20 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    const prompt = buildEmailPrompt(dossier, role, contact_name, template, pitch_bullet, follow_up, sender_name || undefined)
+    let canonicalRole = canonicaliseEmailRole(role)
+    let guidance = DEFAULT_EMAIL_GUIDANCE
+    let recoveredTemplate: EmailTemplateContent | null = null
+    try {
+      const recovered = await getDraftEmailContent(role, Boolean(follow_up))
+      canonicalRole = recovered.canonicalRole
+      guidance = recovered.guidance
+      recoveredTemplate = recovered.template
+    } catch (error) {
+      logSafeError('Email content lookup error:', error)
+    }
+
+    const selectedTemplate = template ?? recoveredTemplate ?? undefined
+    const prompt = buildEmailPrompt(dossier, role, canonicalRole, contact_name, guidance, selectedTemplate, pitch_bullet, follow_up, sender_name || undefined)
 
     let result = await generateOnce(prompt, dossier)
     let totalInputTokens = result.usage.inputTokens
@@ -198,7 +227,12 @@ export async function POST(request: NextRequest) {
       })
     }
 
-    return NextResponse.json({ success: true, email: result.email })
+    return NextResponse.json({
+      success: true,
+      email: result.email,
+      role_group: canonicalRole,
+      template_used: template ? 'Manual selection' : recoveredTemplate?.name ?? null
+    })
 
   } catch (error) {
     logSafeError('Email route error:', error)
