@@ -56,8 +56,7 @@ export default function TemplatesPage() {
 
   useEffect(() => {
     document.title = 'Templates — Atelier'
-    fetchTemplates()
-    fetchGuidance()
+    void fetchTemplates().then(fetchGuidance)
   }, [])
 
   async function fetchTemplates() {
