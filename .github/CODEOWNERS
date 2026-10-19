@@ -1,0 +1,50 @@
+# CODEOWNERS for roryatelier/atelier-sales-tool
+#
+# GitHub requires @roryatelier's review on these paths only after a ruleset
+# on `main` has "Require a pull request" and "Require review from code owners"
+# enabled. This file does not enforce anything by itself.
+#
+# Ordinary UI, docs, tests, and non-owned library code can merge without that
+# review. Security, sending, Lusha, schema, CI, deploy config, and dependencies
+# cannot.
+
+# Repository policy, workflows, Copilot guidance, and this file
+/.github/ @roryatelier
+
+# Deploy target, environment contract, and the checks that enforce them
+/config/ @roryatelier
+/vercel.json @roryatelier
+/scripts/check-deployment-target.mjs @roryatelier
+/scripts/check-env-contract.mjs @roryatelier
+/scripts/check-provider-policy.mjs @roryatelier
+
+# Dependency changes, including lockfile-only bumps
+/package.json @roryatelier
+/package-lock.json @roryatelier
+
+# Authentication, sessions, admission, and credential-safe logging
+/proxy.ts @roryatelier
+/lib/auth-policy.ts @roryatelier
+/lib/api-auth.ts @roryatelier
+/lib/session.ts @roryatelier
+/lib/browser-storage.ts @roryatelier
+/lib/safe-log.ts @roryatelier
+/app/components/UserStorageBoundary.tsx @roryatelier
+/app/api/auth/ @roryatelier
+
+# Gmail sending and the scheduled-send worker
+/lib/gmail.ts @roryatelier
+/app/api/send-email/ @roryatelier
+/app/api/schedule-email/ @roryatelier
+/app/api/cron/ @roryatelier
+
+# Lusha company resolution, search, and explicit email reveal
+/lib/lusha.ts @roryatelier
+/lib/lusha-contact.ts @roryatelier
+/app/api/lookup-contacts/ @roryatelier
+/app/components/useLushaContacts.ts @roryatelier
+/app/components/ContactEmailActions.tsx @roryatelier
+
+# Database schema. Tables are created and altered in this module;
+# there is no separate migrations directory.
+/lib/db.ts @roryatelier
