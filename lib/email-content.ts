@@ -303,6 +303,30 @@ export async function ensureRecoveredEmailContent() {
   else seedSqliteContent()
 }
 
+export interface GuidanceProvenance {
+  source: 'stored' | 'default'
+  revision: string
+}
+
+export type DraftEmailContentProvenance = DraftEmailContent & {
+  guidanceSource: GuidanceProvenance['source']
+  guidanceRevision: string
+}
+
+// Single source of truth for "which guidance did this generation actually use".
+// A missing/blank stored row means the DEFAULT guidance was substituted, and the
+// caller must disclose that rather than silently passing it off as stored content.
+export function guidanceProvenance(stored: { content?: unknown; updated_at?: unknown } | null | undefined): GuidanceProvenance {
+  const content = typeof stored?.content === 'string' && stored.content.trim() ? stored.content : null
+  if (!content) return { source: 'default', revision: 'default' }
+  const revision = typeof stored?.updated_at === 'string' && stored.updated_at.trim()
+    ? stored.updated_at.trim()
+    : typeof stored?.updated_at === 'object' && stored.updated_at !== null
+      ? String(stored.updated_at)
+      : 'unknown'
+  return { source: 'stored', revision }
+}
+
 export async function getEmailGuidance(): Promise<string> {
   await ensureRecoveredEmailContent()
   if (isVercel) {
@@ -314,6 +338,29 @@ export async function getEmailGuidance(): Promise<string> {
   const row = db.prepare('SELECT content FROM email_guidance WHERE id = 1').get() as { content?: string } | undefined
   db.close()
   return row?.content ?? DEFAULT_EMAIL_GUIDANCE
+}
+
+export async function getEmailGuidanceInfo(): Promise<{ content: string; guidanceSource: GuidanceProvenance['source']; guidanceRevision: string }> {
+  await ensureRecoveredEmailContent()
+  if (isVercel) {
+    const { sql } = await import('@vercel/postgres')
+    const result = await sql`SELECT content, updated_at FROM email_guidance WHERE id = 1`
+    const info = guidanceProvenance(result.rows[0] as { content?: unknown; updated_at?: unknown } | undefined)
+    return {
+      content: info.source === 'stored' ? String((result.rows[0] as { content: string }).content) : DEFAULT_EMAIL_GUIDANCE,
+      guidanceSource: info.source,
+      guidanceRevision: info.revision,
+    }
+  }
+  const db = getLocalDb()
+  const row = db.prepare('SELECT content, updated_at FROM email_guidance WHERE id = 1').get() as { content?: string; updated_at?: string } | undefined
+  db.close()
+  const info = guidanceProvenance(row)
+  return {
+    content: info.source === 'stored' ? (row!.content as string) : DEFAULT_EMAIL_GUIDANCE,
+    guidanceSource: info.source,
+    guidanceRevision: info.revision,
+  }
 }
 
 export async function updateEmailGuidance(content: string) {
@@ -328,29 +375,34 @@ export async function updateEmailGuidance(content: string) {
   }
 }
 
-export async function getDraftEmailContent(role: string, followUp: boolean): Promise<DraftEmailContent> {
+export async function getDraftEmailContent(role: string, followUp: boolean): Promise<DraftEmailContentProvenance> {
   const canonicalRole = canonicaliseEmailRole(role)
   await ensureRecoveredEmailContent()
   const templateType = followUp ? 'Follow-up' : 'Cold Outreach'
 
   if (isVercel) {
     const { sql } = await import('@vercel/postgres')
-    const guidanceResult = await sql`SELECT content FROM email_guidance WHERE id = 1`
+    const guidanceResult = await sql`SELECT content, updated_at FROM email_guidance WHERE id = 1`
     const templateResult = await sql`
       SELECT id, name, role, subject, body, target_role, source
       FROM templates
       WHERE role = ${templateType}
       ORDER BY CASE WHEN source = 'recovered' THEN 1 ELSE 0 END, updated_at DESC
     `
+    const guidanceProvenanceInfo = guidanceProvenance(guidanceResult.rows[0] as { content?: unknown; updated_at?: unknown } | undefined)
     return {
       canonicalRole,
-      guidance: String(guidanceResult.rows[0]?.content ?? DEFAULT_EMAIL_GUIDANCE),
+      guidance: guidanceProvenanceInfo.source === 'stored'
+        ? String((guidanceResult.rows[0] as { content: string }).content)
+        : DEFAULT_EMAIL_GUIDANCE,
+      guidanceSource: guidanceProvenanceInfo.source,
+      guidanceRevision: guidanceProvenanceInfo.revision,
       template: chooseTemplate(templateResult.rows as EmailTemplateContent[], canonicalRole)
     }
   }
 
   const db = getLocalDb()
-  const guidance = db.prepare('SELECT content FROM email_guidance WHERE id = 1').get() as { content?: string } | undefined
+  const guidance = db.prepare('SELECT content, updated_at FROM email_guidance WHERE id = 1').get() as { content?: string; updated_at?: string } | undefined
   const templates = db.prepare(`
     SELECT id, name, role, subject, body, target_role, source
     FROM templates
@@ -358,5 +410,12 @@ export async function getDraftEmailContent(role: string, followUp: boolean): Pro
     ORDER BY CASE WHEN source = 'recovered' THEN 1 ELSE 0 END, updated_at DESC
   `).all(templateType) as EmailTemplateContent[]
   db.close()
-  return { canonicalRole, guidance: guidance?.content ?? DEFAULT_EMAIL_GUIDANCE, template: chooseTemplate(templates, canonicalRole) }
+  const guidanceProvenanceInfo = guidanceProvenance(guidance)
+  return {
+    canonicalRole,
+    guidance: guidanceProvenanceInfo.source === 'stored' ? (guidance!.content as string) : DEFAULT_EMAIL_GUIDANCE,
+    guidanceSource: guidanceProvenanceInfo.source,
+    guidanceRevision: guidanceProvenanceInfo.revision,
+    template: chooseTemplate(templates, canonicalRole)
+  }
 }

@@ -1,5 +1,5 @@
 import { authorizeRequest } from '@/lib/api-auth'
-import { getEmailGuidance, updateEmailGuidance } from '@/lib/email-content'
+import { getEmailGuidanceInfo, updateEmailGuidance } from '@/lib/email-content'
 import { logSafeError } from '@/lib/safe-log'
 import { NextRequest, NextResponse } from 'next/server'
 
@@ -8,7 +8,8 @@ export async function GET(request: Request) {
   if (auth.error) return auth.error
 
   try {
-    return NextResponse.json({ success: true, guidance: await getEmailGuidance() })
+    const info = await getEmailGuidanceInfo()
+    return NextResponse.json({ success: true, guidance: info.content, guidance_source: info.guidanceSource, guidance_revision: info.guidanceRevision })
   } catch (error) {
     logSafeError('Email guidance fetch error:', error)
     return NextResponse.json({ error: 'Failed to fetch email guidance' }, { status: 500 })

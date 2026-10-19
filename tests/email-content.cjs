@@ -110,6 +110,99 @@ test('draft provenance distinguishes selected, automatic, template-free and fall
   )
 })
 
+// Note: objects produced inside the transpiled-module sandbox have a different
+// realm prototype, so compare via JSON rather than deepStrictEqual.
+function at(value) { return JSON.stringify(value) }
+
+test('guidance provenance distinguishes stored guidance from the default fallback', () => {
+  assert.equal(
+    at(content.guidanceProvenance({ content: 'Stored guidance text', updated_at: '2026-10-19 05:36:00' })),
+    at({ source: 'stored', revision: '2026-10-19 05:36:00' })
+  )
+  assert.equal(at(content.guidanceProvenance(undefined)), at({ source: 'default', revision: 'default' }))
+  assert.equal(at(content.guidanceProvenance(null)), at({ source: 'default', revision: 'default' }))
+  assert.equal(
+    at(content.guidanceProvenance({ content: '', updated_at: '2026-10-19 05:36:00' })),
+    at({ source: 'default', revision: 'default' })
+  )
+  // A stored row whose timestamp is missing still reports stored, with an honest revision.
+  assert.equal(
+    at(content.guidanceProvenance({ content: 'Stored guidance text' })),
+    at({ source: 'stored', revision: 'unknown' })
+  )
+})
+
+test('draft provenance carries optional guidance fields and stays backward compatible', () => {
+  const withGuidance = provenance.generatedDraftProvenance({
+    apiTemplateName: 'CMO outreach',
+    apiRoleGroup: 'CMO',
+    requestedRole: 'Marketing Director',
+    apiGuidanceSource: 'stored',
+    apiGuidanceRevision: '2026-10-19 05:36:00'
+  })
+  assert.equal(withGuidance.kind, 'automatic-template')
+  assert.equal(withGuidance.guidanceSource, 'stored')
+  assert.equal(withGuidance.guidanceRevision, '2026-10-19 05:36:00')
+
+  // Without guidance inputs the new fields are absent, not undefined — older callers
+  // and persisted snapshots keep the exact same shape as PR #8.
+  assert.equal(
+    JSON.stringify(provenance.generatedDraftProvenance({ requestedRole: 'General Manager' })),
+    JSON.stringify({ kind: 'no-template', templateName: null, roleGroup: 'General Manager' })
+  )
+  const defaultGuidance = provenance.generatedDraftProvenance({
+    requestedRole: 'COO',
+    apiGuidanceSource: 'default',
+    apiGuidanceRevision: 'default'
+  })
+  assert.equal(defaultGuidance.guidanceSource, 'default')
+  assert.equal(defaultGuidance.guidanceRevision, 'default')
+  assert.equal(provenance.fallbackDraftProvenance('COO').guidanceSource, undefined)
+})
+
+test('per-draft instruction reaches the prompt last and is bounded', () => {
+  const route = fs.readFileSync(path.join(root, 'app/api/email/route.ts'), 'utf8')
+  // Accepted and validated on the request body.
+  assert.match(route, /draft_instruction/)
+  assert.match(route, /1000/)
+  // The block exists in both prompt branches and carries an explicit conflict rule.
+  assert.match(route, /PER-DRAFT INSTRUCTION/)
+  assert.match(route, /unless it conflicts with the SIGNAL RULE/)
+  assert.match(route, /must not change global guidance/)
+  // Precedence: the instruction block sits after the safety/signature rules and before
+  // OUTPUT FORMAT in the template branch. Anchor on the template-branch SIGNATURE RULE
+  // usage ('SIGNATURE RULE\n' + SIGNATURE_RULE) — the plain first occurrence of
+  // 'SIGNATURE RULE' is inside the block label itself.
+  const signatureIndex = route.indexOf("'SIGNATURE RULE\\n' + SIGNATURE_RULE")
+  const callSite = 'draftInstructionBlock(draftInstruction)'
+  const templateCallIndex = signatureIndex === -1 ? -1 : route.indexOf(callSite, signatureIndex)
+  const outputIndex = route.indexOf('OUTPUT FORMAT')
+  assert.ok(signatureIndex !== -1 && templateCallIndex !== -1 && outputIndex !== -1)
+  assert.ok(signatureIndex < templateCallIndex, 'instruction must come after the signature safety rule')
+  assert.ok(templateCallIndex < outputIndex, 'instruction must come before the output format')
+  // Non-template branch: instruction sits after the writing rules, before OUTPUT FORMAT.
+  const nonTemplateIndex = route.indexOf('EMAIL WRITING RULES')
+  assert.ok(nonTemplateIndex !== -1)
+  assert.ok(route.indexOf(callSite, nonTemplateIndex) !== -1, 'non-template branch must include the instruction block')
+  // Empty or whitespace-only instructions never inject a block (trimmed value falls
+  // back to undefined before the prompt is built).
+  assert.match(route, /draftInstruction = cleaned \|\| undefined/)
+  assert.match(route, /\(draftInstruction \? draftInstructionBlock\(draftInstruction\) : ''\)/)
+  })
+
+test('guidance fallback is disclosed on every path, including route-level recovery failure', () => {
+  const route = fs.readFileSync(path.join(root, 'app/api/email/route.ts'), 'utf8')
+  // Route-level default fallback declares itself as default guidance.
+  assert.match(route, /guidanceSource = 'default'/)
+  assert.match(route, /guidanceRevision = 'default'/)
+  // The lib reports what it used; the route passes both through to the response.
+  assert.match(route, /guidance_source/)
+  assert.match(route, /guidance_revision/)
+  const lib = fs.readFileSync(path.join(root, 'lib/email-content.ts'), 'utf8')
+  // The lib-level fallback (missing row) also reports default.
+  assert.match(lib, /guidanceProvenance/)
+})
+
 test('template recovery is a one-time migration so user edits and deletions persist', () => {
   const source = fs.readFileSync(path.join(root, 'lib/email-content.ts'), 'utf8')
   assert.match(source, /content_migrations/)

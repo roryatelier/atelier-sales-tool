@@ -85,6 +85,7 @@ interface TabSnapshot {
   showBcc: boolean
   activeTemplate: ActiveTemplate | null
   draftProvenance: DraftProvenance | null
+  draftInstruction: string
   followUpContext: {original_subject?: string; contact_name?: string; date_sent?: string} | null
   selectedBullet: string
   outreachTiming: {recommended_day: string; recommended_date: string; day_reason: string; urgency: string; urgency_reason: string; signal_context: string | null; within_hours: number | null} | null
@@ -114,6 +115,7 @@ export default function EmailPage() {
   const [savedTemplates, setSavedTemplates] = useState<Template[]>([])
   const [activeTemplate, setActiveTemplate] = useState<ActiveTemplate | null>(null)
   const [draftProvenance, setDraftProvenance] = useState<DraftProvenance | null>(null)
+  const [draftInstruction, setDraftInstruction] = useState('')
   const [roleSwitchedTo, setRoleSwitchedTo] = useState<string | null>(null)
   const [showContactDropdown, setShowContactDropdown] = useState(false)
   const [contactHistory, setContactHistory] = useState<{contact_role: string; sent_at: string}[]>([])
@@ -195,7 +197,7 @@ export default function EmailPage() {
     tabDataRef.current.set(activeTabIdRef.current, {
       id: activeTabIdRef.current, dossier, contact, selectedRole, email, loading, warning, error,
       trustGatePassed, sent, needsAuth, toEmail, ccEmail, bccEmail, showCc, showBcc,
-      activeTemplate, draftProvenance, followUpContext, selectedBullet, outreachTiming,
+      activeTemplate, draftProvenance, draftInstruction, followUpContext, selectedBullet, outreachTiming,
       pitchAngles, pitchRoles, recommendedRole, selectedPitchRole
     })
   }
@@ -218,6 +220,7 @@ export default function EmailPage() {
     setShowBcc(snap.showBcc)
     setActiveTemplate(snap.activeTemplate)
     setDraftProvenance(snap.draftProvenance ?? null)
+    setDraftInstruction(snap.draftInstruction ?? '')
     setFollowUpContext(snap.followUpContext)
     setSelectedBullet(snap.selectedBullet)
     setOutreachTiming(snap.outreachTiming)
@@ -256,7 +259,7 @@ export default function EmailPage() {
       email: null, loading: false, warning: '', error: '',
       trustGatePassed: null, sent: false, needsAuth: false,
       toEmail: '', ccEmail: '', bccEmail: '', showCc: false, showBcc: false,
-      activeTemplate: null, draftProvenance: null, followUpContext: null, selectedBullet: '',
+      activeTemplate: null, draftProvenance: null, draftInstruction: '', followUpContext: null, selectedBullet: '',
       outreachTiming, pitchAngles: {}, pitchRoles: ['CEO', 'CMO', 'Head of NPD'],
       recommendedRole: '', selectedPitchRole: 'CEO'
     }
@@ -276,7 +279,7 @@ export default function EmailPage() {
       email: null, loading: false, warning: '', error: '',
       trustGatePassed: null, sent: false, needsAuth: false,
       toEmail: c.email ?? '', ccEmail: '', bccEmail: '', showCc: false, showBcc: false,
-      activeTemplate: null, draftProvenance: null, followUpContext: null, selectedBullet: '',
+      activeTemplate: null, draftProvenance: null, draftInstruction: '', followUpContext: null, selectedBullet: '',
       outreachTiming, pitchAngles: {}, pitchRoles: ['CEO', 'CMO', 'Head of NPD'],
       recommendedRole: '', selectedPitchRole: c.role
     }
@@ -349,6 +352,7 @@ export default function EmailPage() {
             ...t,
             loading: false,
             draftProvenance: t.draftProvenance ?? null,
+            draftInstruction: t.draftInstruction ?? '',
           }))
           tabs.forEach(t => tabDataRef.current.set(t.id, t))
           setTabIds(tabs.map(t => t.id))
@@ -474,7 +478,7 @@ export default function EmailPage() {
       loading: false, warning, error,
       trustGatePassed, sent, needsAuth,
       toEmail, ccEmail, bccEmail, showCc, showBcc,
-      activeTemplate, draftProvenance, followUpContext, selectedBullet, outreachTiming,
+      activeTemplate, draftProvenance, draftInstruction, followUpContext, selectedBullet, outreachTiming,
       pitchAngles, pitchRoles, recommendedRole, selectedPitchRole,
     })
     const allSnaps = tabIds
@@ -605,7 +609,8 @@ export default function EmailPage() {
           template: selectedTemplate,
           pitch_bullet: bullet ?? selectedBullet ?? undefined,
           follow_up: followUpContext ?? undefined,
-          sender_name: userStorage.getItem('atelier_user_name') ?? ''
+          sender_name: userStorage.getItem('atelier_user_name') ?? '',
+          draft_instruction: draftInstruction || undefined
         })
       })
 
@@ -624,6 +629,8 @@ export default function EmailPage() {
                     selectedTemplateName: selectedTemplate?.name,
                     apiRoleGroup: data.role_group,
                     requestedRole: role,
+                    apiGuidanceSource: data.guidance_source,
+                    apiGuidanceRevision: data.guidance_revision,
                   }),
                   trustGatePassed: true,
                   warning: '',
@@ -657,6 +664,8 @@ export default function EmailPage() {
         selectedTemplateName: selectedTemplate?.name,
         apiRoleGroup: data.role_group,
         requestedRole: role,
+        apiGuidanceSource: data.guidance_source,
+        apiGuidanceRevision: data.guidance_revision,
       }))
       setTrustGatePassed(true)
     } catch {
@@ -1200,10 +1209,32 @@ export default function EmailPage() {
                 ? `${draftProvenance.templateName}${draftProvenance.kind === 'manual-template' ? ' (manually selected)' : ''}`
                 : 'Generated without a saved template'}
             {draftProvenance.roleGroup ? ` · ${draftProvenance.roleGroup}` : ''}
+            {draftProvenance.guidanceSource === 'default'
+              ? ' · Default guidance (no saved guidance available)'
+              : draftProvenance.guidanceSource === 'stored'
+                ? ` · Guidance revision ${draftProvenance.guidanceRevision ?? 'unknown'}`
+                : ''}
           </div>
           <a href="/templates" style={{ color: 'var(--brand-400)', fontSize: 12, fontWeight: 500, whiteSpace: 'nowrap' }}>Edit templates →</a>
         </div>
       )}
+
+      <div style={{ marginBottom: 12 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <label className="field-label" style={{ margin: 0, flexShrink: 0 }}>Per-draft instruction</label>
+          <input
+            type="text"
+            value={draftInstruction}
+            onChange={e => setDraftInstruction(e.target.value)}
+            maxLength={1000}
+            placeholder="Optional — e.g. keep it under 60 words. Applies to this draft only."
+            className="input"
+          />
+        </div>
+        <div style={{ fontSize: 11, color: 'var(--slate-400)', marginTop: 4 }}>
+          Lowest precedence: safety rules, verified dossier facts, shared guidance and the template win if they conflict. Click Regenerate to apply.
+        </div>
+      </div>
 
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 20 }}>
