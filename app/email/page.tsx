@@ -4,6 +4,7 @@ import { useLushaContacts } from '@/app/components/useLushaContacts'
 import ContactEmailActions from '@/app/components/ContactEmailActions'
 import { validContactEmail } from '@/lib/lusha-contact'
 import { userStorage, activeStorageOwner, matchesDraftIdentity } from '@/lib/browser-storage'
+import { appendSignature, removeTrailingSignature, signatureFromUnknown, signatureParts } from '@/lib/email-signature'
 
 import React, { useEffect, useLayoutEffect, useState, useRef, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
@@ -25,6 +26,16 @@ interface Dossier {
 }
 
 const MANUAL_DRAFT_WARNING = 'AI draft unavailable — a basic editable draft has been created. Review and personalise it before sending.'
+
+function EmailText({ text }: { text: string }) {
+  return (
+    <div style={{ whiteSpace: 'pre-wrap' }}>
+      {signatureParts(text).map((part, index) => part.type === 'link'
+        ? <a key={index} href={part.href} style={{ color: '#050849' }}>{part.text}</a>
+        : <span key={index}>{part.text}</span>)}
+    </div>
+  )
+}
 
 function buildManualDraft(dossier: Dossier, contactName: string, senderName: string) {
   const brandName = String(dossier.brand_name || 'your brand')
@@ -152,6 +163,11 @@ export default function EmailPage() {
   const savedLinkSelectionRef = useRef<[number, number] | null>(null)
   const [showLinkInput, setShowLinkInput] = useState(false)
   const [linkUrl, setLinkUrl] = useState('')
+  const [signature, setSignature] = useState('')
+  const [signatureLoaded, setSignatureLoaded] = useState(false)
+  const [signatureError, setSignatureError] = useState('')
+  const signatureRef = useRef('')
+  signatureRef.current = signature
 
   function getTabLabel(id: string): string {
     if (id === activeTabId) {
@@ -180,7 +196,7 @@ export default function EmailPage() {
     setDossier(snap.dossier)
     setContact(snap.contact)
     setSelectedRole(snap.selectedRole)
-    setEmail(snap.email)
+    setEmail(snap.email ? { ...snap.email, body: removeTrailingSignature(snap.email.body, signatureRef.current) } : snap.email)
     setLoading(snap.loading)
     setWarning(snap.warning)
     setError(snap.error)
@@ -378,6 +394,41 @@ export default function EmailPage() {
   }, [router,applyTabSnapshot])
 
   useEffect(() => {
+    if (!userGoogleSub) return
+    let cancelled = false
+    setSignature('')
+    setSignatureLoaded(false)
+    setSignatureError('')
+    fetch('/api/signature')
+      .then(async response => {
+        const data = await response.json()
+        if (!response.ok || !data.success) throw new Error('Signature unavailable')
+        if (!cancelled) setSignature(signatureFromUnknown(data.signature))
+      })
+      .catch(() => {
+        if (!cancelled) setSignatureError('Signature could not be loaded. Refresh before sending.')
+      })
+      .finally(() => {
+        if (!cancelled) setSignatureLoaded(true)
+      })
+    return () => { cancelled = true }
+  }, [userGoogleSub])
+
+  useEffect(() => {
+    if (!signature.trim()) return
+    setEmail(prev => {
+      if (!prev) return prev
+      const body = removeTrailingSignature(prev.body, signature)
+      return body === prev.body ? prev : { ...prev, body }
+    })
+    for (const [id, snap] of tabDataRef.current) {
+      if (!snap.email) continue
+      const body = removeTrailingSignature(snap.email.body, signature)
+      if (body !== snap.email.body) tabDataRef.current.set(id, { ...snap, email: { ...snap.email, body } })
+    }
+  }, [signature])
+
+  useEffect(() => {
     if (!dossier) return
     if (tabsRestoredRef.current) { tabsRestoredRef.current = false; return }
     generateEmail(selectedRole)
@@ -496,6 +547,14 @@ export default function EmailPage() {
     }
   }
 
+  function draftFromGeneration(draft: Email): Email {
+    return { subject: draft.subject, body: removeTrailingSignature(draft.body, signatureRef.current) }
+  }
+
+  function outboundBody(): string {
+    return appendSignature(email?.body ?? '', signatureRef.current)
+  }
+
   async function generateEmail(
     role: string,
     template?: { subject: string; body: string },
@@ -543,30 +602,30 @@ export default function EmailPage() {
           tabDataRef.current.set(tabId, {
             ...stale, loading: false,
             ...(res.ok && data.success
-              ? { email: data.email, trustGatePassed: true, warning: '', error: '' }
-              : { email: manualDraft, trustGatePassed: false, warning: data.warning ? `${data.warning} ${MANUAL_DRAFT_WARNING}` : MANUAL_DRAFT_WARNING, error: '' })
+              ? { email: draftFromGeneration(data.email), trustGatePassed: true, warning: '', error: '' }
+              : { email: draftFromGeneration(manualDraft), trustGatePassed: false, warning: data.warning ? `${data.warning} ${MANUAL_DRAFT_WARNING}` : MANUAL_DRAFT_WARNING, error: '' })
           })
         }
         return
       }
 
       if (!res.ok || !data.success) {
-        setEmail(manualDraft)
+        setEmail(draftFromGeneration(manualDraft))
         setWarning(data.warning ? `${data.warning} ${MANUAL_DRAFT_WARNING}` : MANUAL_DRAFT_WARNING)
         setError('')
         setTrustGatePassed(false)
         return
       }
 
-      setEmail(data.email)
+      setEmail(draftFromGeneration(data.email))
       setTrustGatePassed(true)
     } catch {
       if (activeTabIdRef.current !== tabId) {
         const stale = tabDataRef.current.get(tabId)
-        if (stale) tabDataRef.current.set(tabId, { ...stale, loading: false, email: manualDraft, warning: MANUAL_DRAFT_WARNING, error: '', trustGatePassed: false })
+        if (stale) tabDataRef.current.set(tabId, { ...stale, loading: false, email: draftFromGeneration(manualDraft), warning: MANUAL_DRAFT_WARNING, error: '', trustGatePassed: false })
         return
       }
-      setEmail(manualDraft)
+      setEmail(draftFromGeneration(manualDraft))
       setWarning(MANUAL_DRAFT_WARNING)
       setError('')
       setTrustGatePassed(false)
@@ -589,7 +648,7 @@ export default function EmailPage() {
 
   async function handleCopyMessage() {
     if (!email) return
-    await navigator.clipboard.writeText(email.body)
+    await navigator.clipboard.writeText(outboundBody())
     setCopied(true)
     setHasCopied(true)
     setTimeout(() => setCopied(false), 2000)
@@ -617,7 +676,7 @@ export default function EmailPage() {
             target_role: contact?.role ?? selectedRole,
             contact_name: contact?.name ?? '',
             email_subject: email.subject,
-            email_body: email.body,
+            email_body: outboundBody(),
             status: 'Sent',
           }),
         }),
@@ -773,7 +832,7 @@ export default function EmailPage() {
           cc: ccEmail || undefined,
           bcc: bccEmail || undefined,
           subject: email.subject,
-          body: email.body,
+          body: outboundBody(),
           brand_name: dossier?.brand_name,
           contact_name: contact?.name ?? '',
           scheduled_at_local: scheduledAt,
@@ -833,7 +892,7 @@ export default function EmailPage() {
           cc: ccEmail,
           bcc: bccEmail,
           subject: email.subject,
-          emailBody: email.body,
+          emailBody: outboundBody(),
           expectedGoogleSub: userGoogleSub,
           contactName: contact?.name ?? '',
           role: selectedRole,
@@ -901,6 +960,8 @@ export default function EmailPage() {
         {tabIds.map(id => (
           <div
             key={id}
+            role="tab"
+            aria-selected={id === activeTabId}
             onClick={() => switchTab(id)}
             style={{
               display: 'flex', alignItems: 'center', gap: 6,
@@ -931,6 +992,7 @@ export default function EmailPage() {
         ))}
         <button
           onClick={addTab}
+          aria-label="New email tab"
           style={{ marginBottom: 6, marginLeft: 4, padding: '3px 9px', background: 'none', border: '1px solid var(--black-100)', borderRadius: 'var(--radius-sm)', cursor: 'pointer', fontSize: 16, color: 'var(--slate-400)', lineHeight: 1 }}
         >
           +
@@ -1550,6 +1612,21 @@ export default function EmailPage() {
                   </div>
                 )}
               </div>
+              <div aria-label="Email signature" style={{ marginTop: 12 }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+                  <label className="field-label" style={{ margin: 0 }}>Signature</label>
+                  <a href="/templates#signature" style={{ fontSize: 12, fontWeight: 500, color: 'var(--brand-400)', textDecoration: 'none' }}>Edit signature</a>
+                </div>
+                <div data-testid="composer-signature" style={{ fontSize: 13, color: signature.trim() ? 'var(--text-default)' : 'var(--slate-400)', background: 'var(--slate-100)', padding: '14px 16px', borderRadius: 'var(--radius-sm)', border: '1px solid var(--black-100)', lineHeight: 1.6 }}>
+                  {signatureError
+                    ? signatureError
+                    : !signatureLoaded
+                      ? 'Loading signature...'
+                      : signature.trim()
+                        ? <EmailText text={signature} />
+                        : 'No signature saved for this account.'}
+                </div>
+              </div>
               <div style={{ marginTop: 8 }}>
                 <input
                   ref={fileInputRef}
@@ -1638,10 +1715,10 @@ export default function EmailPage() {
 
       {email && !sent && !scheduledTabIds.has(activeTabId) && (
         <div style={{ position: 'sticky', bottom: 24, zIndex: 10, display: 'flex', gap: 8 }}>
-          <button onClick={() => setShowModal(true)} className="btn btn-primary" style={{ flex: 1, height: 52, fontSize: 15, boxShadow: '0 4px 24px rgba(0,0,0,0.12)' }}>
+          <button onClick={() => setShowModal(true)} disabled={!signatureLoaded || !!signatureError} className="btn btn-primary" style={{ flex: 1, height: 52, fontSize: 15, boxShadow: '0 4px 24px rgba(0,0,0,0.12)' }}>
             Send email
           </button>
-          <button onClick={openScheduleModal} className="btn btn-secondary" style={{ flex: 1, height: 52, fontSize: 15, boxShadow: '0 4px 24px rgba(0,0,0,0.12)' }}>
+          <button onClick={openScheduleModal} disabled={!signatureLoaded || !!signatureError} className="btn btn-secondary" style={{ flex: 1, height: 52, fontSize: 15, boxShadow: '0 4px 24px rgba(0,0,0,0.12)' }}>
             🕐 Schedule send
           </button>
           <button onClick={() => generateEmail(selectedRole)} disabled={loading} className="btn btn-secondary" style={{ flex: 1, height: 52, fontSize: 15, boxShadow: '0 4px 24px rgba(0,0,0,0.12)' }}>
@@ -1694,12 +1771,12 @@ export default function EmailPage() {
               )}
               <div style={{ marginTop: 16 }}>
                 <div className="field-label" style={{ marginBottom: 8 }}>Email body</div>
-                <div className="email-full">{email.body}</div>
+                <div className="email-full"><EmailText text={outboundBody()} /></div>
               </div>
             </div>
             <div className="modal-foot">
               <button onClick={() => setShowModal(false)} className="btn btn-secondary">Cancel</button>
-              <button onClick={handleSend} disabled={sending || !userGoogleSub} className="btn btn-primary">
+              <button onClick={handleSend} disabled={sending || !userGoogleSub || !signatureLoaded || !!signatureError} className="btn btn-primary">
                 {sending ? 'Sending...' : 'Confirm send'}
               </button>
             </div>
@@ -1755,6 +1832,10 @@ export default function EmailPage() {
               <div style={{ borderTop: '1px solid var(--black-100)', paddingTop: 16 }}>
                 <div className="summary-row"><div className="k">To</div><div className="v">{toEmail || '—'}</div></div>
                 <div className="summary-row"><div className="k">Subject</div><div className="v">{email.subject}</div></div>
+              </div>
+              <div style={{ marginTop: 16 }}>
+                <div className="field-label" style={{ marginBottom: 8 }}>Email body</div>
+                <div className="email-full"><EmailText text={outboundBody()} /></div>
               </div>
             </div>
             <div className="modal-foot">

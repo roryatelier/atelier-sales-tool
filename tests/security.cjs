@@ -34,6 +34,11 @@ const google = {
   gmail: () => ({ users: { messages: { send: async () => { providerCalls++; gmailSendCalls++; const error = gmailSendErrors.shift(); if (error) throw error; return { data: { id: 'test-message-id' } }; } } } }),
   sheets: () => ({ spreadsheets: { values: { append: async () => { if (sheetsShouldFail) throw new Error('Sheets unavailable'); } } } }),
 };
+const dbMock = {
+  isVercel: false,
+  initialiseDb: async () => { providerCalls++; throw new Error('Unexpected DB call'); },
+  getLocalDb() { throw new Error('Unexpected DB call'); },
+};
 function load(relative) {
   const filename = path.resolve(root, relative);
   if (cache.has(filename)) return cache.get(filename);
@@ -49,7 +54,7 @@ function load(relative) {
       if (name === 'next/server') return require('next/server');
       if (name === 'next/headers') return { cookies: async () => ({ get: name => cookieValues[name] ? { value: cookieValues[name] } : undefined }) };
       if (name === 'googleapis') return { google };
-      if (name === '@/lib/db') return { initialiseDb: async () => { providerCalls++; throw new Error('Unexpected DB call'); }, isVercel: false };
+      if (name === '@/lib/db') return dbMock;
       if (name.startsWith('@/')) return load(name.slice(2) + '.ts');
       if (name.startsWith('.')) return load(path.relative(root, path.resolve(path.dirname(filename), name)) + '.ts');
       throw new Error('Unmocked module: ' + name);
@@ -322,4 +327,76 @@ test('direct sends return safe actionable Gmail failures and only retry explicit
 
   gmailSendErrors = [];
   externalFetch = async () => { throw new Error('Unexpected external call'); };
+});
+
+test('signature API cannot read or write another account', async () => {
+  const Database = require('better-sqlite3');
+  const os = require('node:os');
+  const dbPath = path.join(os.tmpdir(), `atelier-signature-${process.pid}.db`);
+  fs.rmSync(dbPath, { force: true });
+  const previousAllow = env.APP_ALLOWED_EMAILS;
+  const previousInit = dbMock.initialiseDb;
+  const previousGet = dbMock.getLocalDb;
+  const previousVercel = dbMock.isVercel;
+  const accountA = { googleSub: 'signature-account-a', email: 'sig-a@example.invalid', name: 'Fixture A', picture: '' };
+  const accountB = { googleSub: 'signature-account-b', email: 'sig-b@example.invalid', name: 'Fixture B', picture: '' };
+  env.APP_ALLOWED_EMAILS = [user.email, accountA.email, accountB.email].join(',');
+  dbMock.isVercel = false;
+  dbMock.initialiseDb = async () => {
+    const db = new Database(dbPath);
+    db.exec(`CREATE TABLE IF NOT EXISTS email_signatures (owner_google_sub TEXT PRIMARY KEY, owner_email TEXT NOT NULL DEFAULT '', content TEXT NOT NULL DEFAULT '', updated_at TEXT DEFAULT (datetime('now')))`);
+    db.close();
+  };
+  dbMock.getLocalDb = () => new Database(dbPath);
+  try {
+    const route = load('app/api/signature/route.ts');
+    const request = (method, body, query = '') => new NextRequest(`https://example.invalid/api/signature${query}`, {
+      method,
+      headers: { origin: 'https://example.invalid', 'content-type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    cookieValues = { atelier_session: await policy.signSession(accountA) };
+    assert.equal((await route.GET(request('GET'))).status, 200);
+    assert.equal((await (await route.GET(request('GET'))).json()).signature, '');
+    const saved = await route.PUT(request('PUT', {
+      signature: 'Signature A\n[Site](https://portfolio.example.invalid/a)',
+      owner_google_sub: accountB.googleSub,
+      owner_email: accountB.email,
+    }));
+    assert.equal(saved.status, 200);
+    assert.equal((await saved.json()).signature, 'Signature A\n[Site](https://portfolio.example.invalid/a)');
+
+    cookieValues = { atelier_session: await policy.signSession(accountB) };
+    const foreignRead = await route.GET(request('GET', undefined, `?owner_google_sub=${accountA.googleSub}`));
+    assert.equal(foreignRead.status, 200);
+    assert.equal((await foreignRead.json()).signature, '');
+    const foreignWrite = await route.PUT(request('PUT', {
+      signature: 'Signature B',
+      owner_google_sub: accountA.googleSub,
+      owner_email: accountA.email,
+    }));
+    assert.equal(foreignWrite.status, 200);
+    assert.equal((await foreignWrite.json()).signature, 'Signature B');
+    assert.equal((await (await route.GET(request('GET', undefined, `?owner_google_sub=${accountA.googleSub}`))).json()).signature, 'Signature B');
+
+    cookieValues = { atelier_session: await policy.signSession(accountA) };
+    assert.equal((await (await route.GET(request('GET'))).json()).signature, 'Signature A\n[Site](https://portfolio.example.invalid/a)');
+    const db = new Database(dbPath);
+    const rows = db.prepare('SELECT owner_google_sub, content FROM email_signatures ORDER BY owner_google_sub').all();
+    db.close();
+    assert.deepEqual(rows, [
+      { owner_google_sub: accountA.googleSub, content: 'Signature A\n[Site](https://portfolio.example.invalid/a)' },
+      { owner_google_sub: accountB.googleSub, content: 'Signature B' },
+    ]);
+    assert.equal((await route.PUT(request('PUT', { signature: 12 }))).status, 400);
+    assert.equal((await route.PUT(request('PUT', { signature: 'x'.repeat(4001), owner_google_sub: accountB.googleSub }))).status, 400);
+    assert.equal((await (await route.GET(request('GET'))).json()).signature, 'Signature A\n[Site](https://portfolio.example.invalid/a)');
+  } finally {
+    env.APP_ALLOWED_EMAILS = previousAllow;
+    dbMock.initialiseDb = previousInit;
+    dbMock.getLocalDb = previousGet;
+    dbMock.isVercel = previousVercel;
+    cookieValues = {};
+    fs.rmSync(dbPath, { force: true });
+  }
 });
