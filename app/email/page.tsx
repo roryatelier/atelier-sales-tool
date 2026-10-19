@@ -4,6 +4,11 @@ import { useLushaContacts } from '@/app/components/useLushaContacts'
 import ContactEmailActions from '@/app/components/ContactEmailActions'
 import { validContactEmail } from '@/lib/lusha-contact'
 import { userStorage, activeStorageOwner, matchesDraftIdentity } from '@/lib/browser-storage'
+import {
+  fallbackDraftProvenance,
+  generatedDraftProvenance,
+  type DraftProvenance,
+} from '@/lib/email-template-provenance'
 
 import React, { useEffect, useLayoutEffect, useState, useRef, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
@@ -50,6 +55,12 @@ interface Template {
   target_role?: string
 }
 
+interface ActiveTemplate {
+  name?: string
+  subject: string
+  body: string
+}
+
 interface TabSnapshot {
   id: string
   dossier: Dossier | null
@@ -67,7 +78,8 @@ interface TabSnapshot {
   bccEmail: string
   showCc: boolean
   showBcc: boolean
-  activeTemplate: { subject: string; body: string } | null
+  activeTemplate: ActiveTemplate | null
+  draftProvenance: DraftProvenance | null
   followUpContext: {original_subject?: string; contact_name?: string; date_sent?: string} | null
   selectedBullet: string
   outreachTiming: {recommended_day: string; recommended_date: string; day_reason: string; urgency: string; urgency_reason: string; signal_context: string | null; within_hours: number | null} | null
@@ -95,7 +107,8 @@ export default function EmailPage() {
   const [needsAuth, setNeedsAuth] = useState(false)
   const [showTemplates, setShowTemplates] = useState(false)
   const [savedTemplates, setSavedTemplates] = useState<Template[]>([])
-  const [activeTemplate, setActiveTemplate] = useState<{ subject: string; body: string } | null>(null)
+  const [activeTemplate, setActiveTemplate] = useState<ActiveTemplate | null>(null)
+  const [draftProvenance, setDraftProvenance] = useState<DraftProvenance | null>(null)
   const [roleSwitchedTo, setRoleSwitchedTo] = useState<string | null>(null)
   const [showContactDropdown, setShowContactDropdown] = useState(false)
   const [contactHistory, setContactHistory] = useState<{contact_role: string; sent_at: string}[]>([])
@@ -136,6 +149,7 @@ export default function EmailPage() {
   const [checked, setChecked] = useState(false)
   const [tabIds, setTabIds] = useState<string[]>(['tab-0'])
   const [activeTabId, setActiveTabId] = useState<string>('tab-0')
+  const [tabPersistenceRevision, setTabPersistenceRevision] = useState(0)
   const activeTabIdRef = useRef<string>('tab-0')
   const tabCounterRef = useRef<number>(0)
   const pendingGenerateRef = useRef<{ role: string; explicitDossier: Dossier; explicitContactName: string } | null>(null)
@@ -171,7 +185,7 @@ export default function EmailPage() {
     tabDataRef.current.set(activeTabIdRef.current, {
       id: activeTabIdRef.current, dossier, contact, selectedRole, email, loading, warning, error,
       trustGatePassed, sent, needsAuth, toEmail, ccEmail, bccEmail, showCc, showBcc,
-      activeTemplate, followUpContext, selectedBullet, outreachTiming,
+      activeTemplate, draftProvenance, followUpContext, selectedBullet, outreachTiming,
       pitchAngles, pitchRoles, recommendedRole, selectedPitchRole
     })
   }
@@ -193,6 +207,7 @@ export default function EmailPage() {
     setShowCc(snap.showCc)
     setShowBcc(snap.showBcc)
     setActiveTemplate(snap.activeTemplate)
+    setDraftProvenance(snap.draftProvenance ?? null)
     setFollowUpContext(snap.followUpContext)
     setSelectedBullet(snap.selectedBullet)
     setOutreachTiming(snap.outreachTiming)
@@ -231,7 +246,7 @@ export default function EmailPage() {
       email: null, loading: false, warning: '', error: '',
       trustGatePassed: null, sent: false, needsAuth: false,
       toEmail: '', ccEmail: '', bccEmail: '', showCc: false, showBcc: false,
-      activeTemplate: null, followUpContext: null, selectedBullet: '',
+      activeTemplate: null, draftProvenance: null, followUpContext: null, selectedBullet: '',
       outreachTiming, pitchAngles: {}, pitchRoles: ['CEO', 'CMO', 'Head of NPD'],
       recommendedRole: '', selectedPitchRole: 'CEO'
     }
@@ -251,7 +266,7 @@ export default function EmailPage() {
       email: null, loading: false, warning: '', error: '',
       trustGatePassed: null, sent: false, needsAuth: false,
       toEmail: c.email ?? '', ccEmail: '', bccEmail: '', showCc: false, showBcc: false,
-      activeTemplate: null, followUpContext: null, selectedBullet: '',
+      activeTemplate: null, draftProvenance: null, followUpContext: null, selectedBullet: '',
       outreachTiming, pitchAngles: {}, pitchRoles: ['CEO', 'CMO', 'Head of NPD'],
       recommendedRole: '', selectedPitchRole: c.role
     }
@@ -320,7 +335,11 @@ export default function EmailPage() {
           persisted.brandName === (parsedDossier.brand_name as string) &&
           Array.isArray(persisted.tabs) && persisted.tabs.length > 0
         ) {
-          const tabs: TabSnapshot[] = (persisted.tabs as TabSnapshot[]).map(t => ({ ...t, loading: false }))
+          const tabs: TabSnapshot[] = (persisted.tabs as TabSnapshot[]).map(t => ({
+            ...t,
+            loading: false,
+            draftProvenance: t.draftProvenance ?? null,
+          }))
           tabs.forEach(t => tabDataRef.current.set(t.id, t))
           setTabIds(tabs.map(t => t.id))
           tabCounterRef.current = Math.max(0, ...tabs.map(t => {
@@ -410,7 +429,7 @@ export default function EmailPage() {
       loading: false, warning, error,
       trustGatePassed, sent, needsAuth,
       toEmail, ccEmail, bccEmail, showCc, showBcc,
-      activeTemplate, followUpContext, selectedBullet, outreachTiming,
+      activeTemplate, draftProvenance, followUpContext, selectedBullet, outreachTiming,
       pitchAngles, pitchRoles, recommendedRole, selectedPitchRole,
     })
     const allSnaps = tabIds
@@ -424,7 +443,7 @@ export default function EmailPage() {
       }))
     } catch {}
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [email, tabIds, activeTabId])
+  }, [email, draftProvenance, tabIds, activeTabId, tabPersistenceRevision])
 
   // Restore textarea cursor position after React commits the new email body to DOM.
   // requestAnimationFrame is unreliable in concurrent mode — useLayoutEffect fires
@@ -498,7 +517,7 @@ export default function EmailPage() {
 
   async function generateEmail(
     role: string,
-    template?: { subject: string; body: string },
+    template?: ActiveTemplate | null,
     bullet?: string,
     explicit?: { dossier: Dossier; contactName: string }
   ) {
@@ -509,6 +528,7 @@ export default function EmailPage() {
     setWarning('')
     setError('')
     setEmail(null)
+    setDraftProvenance(null)
     setTrustGatePassed(null)
 
     const contactName = explicit
@@ -521,6 +541,7 @@ export default function EmailPage() {
     )
 
     try {
+      const selectedTemplate = template === undefined ? activeTemplate ?? undefined : template ?? undefined
       const res = await fetch('/api/email', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -528,7 +549,7 @@ export default function EmailPage() {
           dossier: activeDossier,
           role,
           contact_name: contactName,
-          template: template ?? activeTemplate ?? undefined,
+          template: selectedTemplate,
           pitch_bullet: bullet ?? selectedBullet ?? undefined,
           follow_up: followUpContext ?? undefined,
           sender_name: userStorage.getItem('atelier_user_name') ?? ''
@@ -543,15 +564,34 @@ export default function EmailPage() {
           tabDataRef.current.set(tabId, {
             ...stale, loading: false,
             ...(res.ok && data.success
-              ? { email: data.email, trustGatePassed: true, warning: '', error: '' }
-              : { email: manualDraft, trustGatePassed: false, warning: data.warning ? `${data.warning} ${MANUAL_DRAFT_WARNING}` : MANUAL_DRAFT_WARNING, error: '' })
+              ? {
+                  email: data.email,
+                  draftProvenance: generatedDraftProvenance({
+                    apiTemplateName: data.template_used,
+                    selectedTemplateName: selectedTemplate?.name,
+                    apiRoleGroup: data.role_group,
+                    requestedRole: role,
+                  }),
+                  trustGatePassed: true,
+                  warning: '',
+                  error: '',
+                }
+              : {
+                  email: manualDraft,
+                  draftProvenance: fallbackDraftProvenance(role),
+                  trustGatePassed: false,
+                  warning: data.warning ? `${data.warning} ${MANUAL_DRAFT_WARNING}` : MANUAL_DRAFT_WARNING,
+                  error: '',
+                })
           })
+          setTabPersistenceRevision(revision => revision + 1)
         }
         return
       }
 
       if (!res.ok || !data.success) {
         setEmail(manualDraft)
+        setDraftProvenance(fallbackDraftProvenance(role))
         setWarning(data.warning ? `${data.warning} ${MANUAL_DRAFT_WARNING}` : MANUAL_DRAFT_WARNING)
         setError('')
         setTrustGatePassed(false)
@@ -559,14 +599,24 @@ export default function EmailPage() {
       }
 
       setEmail(data.email)
+      setDraftProvenance(generatedDraftProvenance({
+        apiTemplateName: data.template_used,
+        selectedTemplateName: selectedTemplate?.name,
+        apiRoleGroup: data.role_group,
+        requestedRole: role,
+      }))
       setTrustGatePassed(true)
     } catch {
       if (activeTabIdRef.current !== tabId) {
         const stale = tabDataRef.current.get(tabId)
-        if (stale) tabDataRef.current.set(tabId, { ...stale, loading: false, email: manualDraft, warning: MANUAL_DRAFT_WARNING, error: '', trustGatePassed: false })
+        if (stale) {
+          tabDataRef.current.set(tabId, { ...stale, loading: false, email: manualDraft, draftProvenance: fallbackDraftProvenance(role), warning: MANUAL_DRAFT_WARNING, error: '', trustGatePassed: false })
+          setTabPersistenceRevision(revision => revision + 1)
+        }
         return
       }
       setEmail(manualDraft)
+      setDraftProvenance(fallbackDraftProvenance(role))
       setWarning(MANUAL_DRAFT_WARNING)
       setError('')
       setTrustGatePassed(false)
@@ -1071,14 +1121,31 @@ export default function EmailPage() {
       {activeTemplate && (
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: 'var(--brand-100)', border: '1px solid var(--brand-200)', borderRadius: 'var(--radius-md)', padding: '10px 16px', marginBottom: 12 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <span style={{ fontSize: 13, color: 'var(--brand-400)', fontWeight: 500 }}>Using saved template as style guide</span>
+            <span style={{ fontSize: 13, color: 'var(--brand-400)', fontWeight: 500 }}>
+              Template selected for regeneration: {activeTemplate.name ?? 'Saved template'}
+            </span>
             {roleSwitchedTo && (
               <span style={{ fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em', background: '#050849', color: '#fff', padding: '2px 8px', borderRadius: 4 }}>
                 → Role switched to {roleSwitchedTo}
               </span>
             )}
           </div>
-          <button onClick={() => { setActiveTemplate(null); generateEmail(selectedRole) }} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--brand-400)', fontSize: 12 }}>Remove ×</button>
+          <button onClick={() => { setActiveTemplate(null); generateEmail(selectedRole, null) }} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--brand-400)', fontSize: 12 }}>Remove ×</button>
+        </div>
+      )}
+
+      {email && draftProvenance && (
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, background: '#fff', border: '1px solid var(--black-100)', borderRadius: 'var(--radius-md)', padding: '10px 16px', marginBottom: 12 }}>
+          <div style={{ fontSize: 12, color: 'var(--slate-500)', lineHeight: 1.5 }}>
+            <span style={{ fontWeight: 600, color: 'var(--slate-600)' }}>Generation source: </span>
+            {draftProvenance.kind === 'fallback'
+              ? 'Basic fallback draft — no saved template used'
+              : draftProvenance.templateName
+                ? `${draftProvenance.templateName}${draftProvenance.kind === 'manual-template' ? ' (manually selected)' : ''}`
+                : 'Generated without a saved template'}
+            {draftProvenance.roleGroup ? ` · ${draftProvenance.roleGroup}` : ''}
+          </div>
+          <a href="/templates" style={{ color: 'var(--brand-400)', fontSize: 12, fontWeight: 500, whiteSpace: 'nowrap' }}>Edit templates →</a>
         </div>
       )}
 
@@ -1214,7 +1281,7 @@ export default function EmailPage() {
                 </div>
                 <button
                   onClick={() => {
-                    const tmpl = { subject: t.subject, body: t.body }
+                    const tmpl = { name: t.name, subject: t.subject, body: t.body }
                     setActiveTemplate(tmpl)
                     setShowTemplates(false)
                     const roleToUse = t.target_role && t.target_role !== '' ? t.target_role : selectedRole
