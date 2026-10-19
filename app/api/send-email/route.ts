@@ -5,6 +5,7 @@ import { authorizeRequest } from '@/lib/api-auth'
 import { NextRequest, NextResponse } from 'next/server'
 import { google } from 'googleapis'
 import { classifyGmailError } from '@/lib/gmail'
+import { buildHtmlEmailRaw } from '@/lib/email-mime'
 import { logSafeError } from '@/lib/safe-log'
 
 const REDIRECT_URI = process.env.PRODUCTION_URL
@@ -17,106 +18,6 @@ function getOAuthClient() {
     process.env.GMAIL_CLIENT_SECRET,
     REDIRECT_URI
   )
-}
-
-interface Attachment {
-  name: string
-  type: string
-  data: string // base64
-}
-
-function toBase64Url(buf: Buffer): string {
-  return buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
-}
-
-function markdownToHtml(text: string): string {
-  const lines = text.split('\n')
-  const processed: string[] = []
-  let inList = false
-
-  for (const line of lines) {
-    const bulletMatch = line.match(/^\s*- (.+)/)
-    if (bulletMatch) {
-      if (!inList) { processed.push('<ul style="margin:8px 0;padding-left:20px;">'); inList = true }
-      processed.push('<li>' + bulletMatch[1] + '</li>')
-    } else {
-      if (inList) { processed.push('</ul>'); inList = false }
-      processed.push(line)
-    }
-  }
-  if (inList) processed.push('</ul>')
-
-  let html = processed.join('\n')
-
-  // Bold before italic to avoid partial matches
-  html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-  html = html.replace(/\*([^*\n]+)\*/g, '<em>$1</em>')
-
-  // Markdown links
-  html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" style="color:#050849;">$1</a>')
-
-  // Newlines → <br>, but don't add <br> adjacent to block elements
-  html = html.replace(/\n/g, '<br>')
-  html = html.replace(/<br>(<\/?ul>|<li>)/g, '$1')
-  html = html.replace(/(<\/ul>|<\/li>)<br>/g, '$1')
-
-  return `<html><body style="font-family:sans-serif;font-size:14px;line-height:1.6;">${html}</body></html>`
-}
-
-function makeEmailBody(to: string, subject: string, body: string, attachments?: Attachment[], cc?: string, bcc?: string): string {
-  const ccAddresses = cc ? cc.split(',').map(e => e.trim()).filter(Boolean).join(', ') : ''
-  const bccAddresses = bcc ? bcc.split(',').map(e => e.trim()).filter(Boolean).join(', ') : ''
-  const encodedSubject = `=?UTF-8?B?${Buffer.from(subject, 'utf-8').toString('base64')}?=`
-
-  const htmlBody = markdownToHtml(body)
-  const htmlBodyB64 = Buffer.from(htmlBody, 'utf-8').toString('base64').match(/.{1,76}/g)!.join('\r\n')
-
-  if (!attachments || attachments.length === 0) {
-    const lines = [
-      `To: ${to}`,
-      ...(ccAddresses ? [`Cc: ${ccAddresses}`] : []),
-      ...(bccAddresses ? [`Bcc: ${bccAddresses}`] : []),
-      `Subject: ${encodedSubject}`,
-      'MIME-Version: 1.0',
-      'Content-Type: text/html; charset=utf-8',
-      'Content-Transfer-Encoding: base64',
-      '',
-      htmlBodyB64,
-    ]
-    return toBase64Url(Buffer.from(lines.join('\r\n')))
-  }
-
-  const boundary = `----=_Boundary_${Date.now().toString(36)}`
-  const parts: string[] = [
-    `To: ${to}`,
-    ...(ccAddresses ? [`Cc: ${ccAddresses}`] : []),
-    ...(bccAddresses ? [`Bcc: ${bccAddresses}`] : []),
-    `Subject: ${encodedSubject}`,
-    'MIME-Version: 1.0',
-    `Content-Type: multipart/mixed; boundary="${boundary}"`,
-    '',
-    `--${boundary}`,
-    'Content-Type: text/html; charset=utf-8',
-    'Content-Transfer-Encoding: base64',
-    '',
-    htmlBodyB64,
-  ]
-
-  for (const att of attachments) {
-    const safeName = `=?UTF-8?B?${Buffer.from(att.name, 'utf-8').toString('base64')}?=`
-    const chunks = att.data.match(/.{1,76}/g)?.join('\r\n') ?? att.data
-    parts.push(
-      `--${boundary}`,
-      `Content-Type: ${att.type || 'application/octet-stream'}; name="${safeName}"`,
-      'Content-Transfer-Encoding: base64',
-      `Content-Disposition: attachment; filename="${safeName}"`,
-      '',
-      chunks,
-    )
-  }
-
-  parts.push(`--${boundary}--`)
-  return toBase64Url(Buffer.from(parts.join('\r\n')))
 }
 
 type RefreshResult = { accessToken: string } | { error: 'reauth' | 'temporary' | 'configuration' }
@@ -218,7 +119,7 @@ export async function POST(request: NextRequest) {
       (attachments ?? []).some((att: { type: string; data: string }) => !/^[a-zA-Z0-9!#$&^_.+-]+\/[a-zA-Z0-9!#$&^_.+-]+$/.test(att.type) || !/^[A-Za-z0-9+/]*={0,2}$/.test(att.data) || att.data.length % 4 !== 0)) {
       return NextResponse.json({ error: 'Invalid recipients or attachment format' }, { status: 400 })
     }
-    const raw = makeEmailBody(to, subject, emailBody, attachments, cc, bcc)
+    const raw = buildHtmlEmailRaw(to, subject, emailBody, cc, bcc, attachments)
     let newAccessToken: string | null = null
 
     // If no access token but refresh token exists, refresh before first attempt

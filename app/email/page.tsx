@@ -4,7 +4,7 @@ import { useLushaContacts } from '@/app/components/useLushaContacts'
 import ContactEmailActions from '@/app/components/ContactEmailActions'
 import { validContactEmail } from '@/lib/lusha-contact'
 import { userStorage, activeStorageOwner, matchesDraftIdentity } from '@/lib/browser-storage'
-import { appendSignature, removeTrailingSignature, signatureFromUnknown, signatureParts } from '@/lib/email-signature'
+import { appendSignature, removeTrailingSignature, renderEmailDocument, signatureFromUnknown } from '@/lib/email-signature'
 
 import React, { useEffect, useLayoutEffect, useState, useRef, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
@@ -28,13 +28,7 @@ interface Dossier {
 const MANUAL_DRAFT_WARNING = 'AI draft unavailable — a basic editable draft has been created. Review and personalise it before sending.'
 
 function EmailText({ text }: { text: string }) {
-  return (
-    <div style={{ whiteSpace: 'pre-wrap' }}>
-      {signatureParts(text).map((part, index) => part.type === 'link'
-        ? <a key={index} href={part.href} style={{ color: '#050849' }}>{part.text}</a>
-        : <span key={index}>{part.text}</span>)}
-    </div>
-  )
+  return <div style={{ whiteSpace: 'normal' }} dangerouslySetInnerHTML={{ __html: renderEmailDocument(text) }} />
 }
 
 function buildManualDraft(dossier: Dossier, contactName: string, senderName: string) {
