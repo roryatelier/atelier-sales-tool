@@ -1,5 +1,7 @@
 # Security containment release checklist
 
+> **Status, 19 October 2026.** This note describes the containment patch. Later commits on `main` restored scheduled sending for new owner-bound jobs (`delivery_status = pending`). Rows that were never given an owner stay `legacy_quarantined`, and the worker does not claim them. Do not return the worker to a blanket rejection, and do not auto-send quarantined rows, unless that change is explicitly requested and reviewed. The current backlog is [`doc/ROADMAP.md`](doc/ROADMAP.md).
+
 This branch hardens application access and quarantines the legacy scheduler. It does not revoke external credentials or implement the functional repair plan.
 
 ## Required configuration
@@ -33,4 +35,4 @@ Before production release, obtain the approved named-user list, authoritative re
 
 After rollout, anonymous calls to each application API must deny without provider work, old sessions must fail, valid named users must reconnect successfully, cross-origin mutations must fail, and the scheduler must remain visibly paused. A controlled send check requires a designated test recipient and records Gmail acceptance separately from downstream synchronization.
 
-Rollback must retain these authorization controls, revoked-key replacement and job quarantine. Do not restore exposed credentials or the old scheduler. The consolidated functional repair plan lives alongside the checkout in `CONSOLIDATED_REPAIR_PLAN.md`.
+Rollback must retain these authorization controls, revoked-key replacement and job quarantine. Do not restore exposed credentials or the old scheduler. The current functional backlog is [`doc/ROADMAP.md`](doc/ROADMAP.md).

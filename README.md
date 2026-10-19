@@ -1,5 +1,7 @@
 # Atelier Sales Intelligence Tool
 
+Agents working in this repository should read [AGENTS.md](AGENTS.md) and the backlog in [doc/ROADMAP.md](doc/ROADMAP.md) before changing code.
+
 ## What It Does
 
 The Atelier Sales Intelligence Tool is an AI-powered B2B outreach platform built for Atelier's VP of Client Partnerships. It automates brand research, ICP scoring, contact finding, and personalised email generation for prestige beauty brands across ANZ and the US. The tool researches any brand using live web search, scores it against Atelier's Ideal Customer Profile, surfaces buying signals, finds decision-maker contacts via Lusha, generates personalised cold outreach emails, and tracks all activity in a Google Sheets pipeline.
@@ -8,19 +10,19 @@ The Atelier Sales Intelligence Tool is an AI-powered B2B outreach platform built
 
 ## Tech Stack
 
-- **Framework:** Next.js 14 (App Router, TypeScript)
-- **AI:** OpenAI Responses API with web search
-- **Database:** Vercel Postgres (production), SQLite via better-sqlite3 (local)
-- **Auth:** Google OAuth2 (Gmail send scope + userinfo)
+- **Framework:** Next.js 16.2.9 (App Router, TypeScript), React 19, Tailwind 4
+- **AI:** OpenAI Responses API with web search, through the shared modules in `lib/openai*.ts`
+- **Database:** Neon/Vercel Postgres when `POSTGRES_URL` is set; SQLite via better-sqlite3 locally. On Vercel, a missing Postgres URL fails closed.
+- **Auth:** Google OAuth2 (Gmail send scope + userinfo), exact named-user allowlist
 - **Integrations:** Lusha API v3 (contacts), Google Sheets API v4 (pipeline), Gmail API (send)
-- **Deployment:** Vercel project `atelier-sales-preview`; releases must pass CI, Preview smoke tests and production canaries
-- **Session:** JWT via jose library
+- **Deployment:** Vercel project `atelier-sales-preview` (see `config/deployment.json`). Production ships when Vercel builds `main`. CI job `verify` runs `npm run verify:ci`.
+- **Session:** versioned JWT via the jose library
 
 ---
 
 ## Prerequisites
 
-- Node.js 18+
+- Node.js 20.9+ (CI uses Node.js 20)
 - npm 9+
 - OpenAI API key
 - Google Cloud project with OAuth2 credentials and a service account
@@ -34,12 +36,12 @@ The Atelier Sales Intelligence Tool is an AI-powered B2B outreach platform built
 ### 1. Clone the repo
 ```bash
 git clone https://github.com/roryatelier/atelier-sales-tool.git
-cd atelier
+cd atelier-sales-tool
 ```
 
 ### 2. Install dependencies
 ```bash
-npm install
+npm ci
 ```
 
 ### 3. Set up environment variables
@@ -47,25 +49,25 @@ Create a `.env.local` file in the root:
 
 OPENAI_API_KEY=your_openai_api_key
 
-APP_ALLOWED_EMAILS=samara@atelier.co,ella@atelier.co,peter@atelier.co
+APP_ALLOWED_EMAILS=user@example.com
 
 GMAIL_CLIENT_ID=your_google_oauth_client_id
 
 GMAIL_CLIENT_SECRET=your_google_oauth_client_secret
 
-GOOGLE_SHEETS_ID=1t2dGrIg9sQYGuqhU38qYcHBRM9XYmk3LFa_k_mA4cd8
+GOOGLE_SHEETS_ID=your_spreadsheet_id
 
 GOOGLE_SERVICE_ACCOUNT={"type":"service_account","project_id":"..."}
 
 LUSHA_API_KEY=your_lusha_api_key
 
-JWT_SECRET=any_random_secret_string
+JWT_SECRET=replace-with-a-random-string-of-at-least-32-characters
 
 POSTGRES_URL=your_isolated_database_url
 
 PRODUCTION_URL=http://localhost:3000
 
-> Note: `GOOGLE_SERVICE_ACCOUNT` is the full JSON content of the service account key file as a single line string.
+> Note: `GOOGLE_SERVICE_ACCOUNT` is the full JSON content of the service account key file as a single line string. `JWT_SECRET` must be at least 32 characters. Local development may set `PRODUCTION_URL` to `http://localhost:3000`. `npm run verify:release` requires that value to be `https` when it is set, because that command checks the deployment environment contract.
 
 ### 4. Run the development server
 ```bash
@@ -76,40 +78,32 @@ Open http://localhost:3000. You will be redirected to Google OAuth on first load
 
 ---
 
-## Deploying to Vercel
+## Deploying
 
-### 1. Push to GitHub
+Production deploys when Vercel builds `main` for the project in `config/deployment.json` (`atelier-sales-preview`, alias `https://atelier-sales-preview.vercel.app`). Pull requests get Preview deployments only after that project's Git integration is connected. This repository does not deploy itself, and a push does not deploy until that integration is in place.
+
+The canonical project is the one named in `config/deployment.json`. Do not point releases at any other Vercel project.
+
+On a machine already linked to that project, the local release gate is:
+
 ```bash
-git add .
-git commit -m "your message"
-git push
+npm run verify:release
 ```
 
-### 2. Connect to Vercel
-- Go to https://vercel.com
-- Import the GitHub repo
-- Vercel auto-detects Next.js
+That runs `verify:ci`, checks the environment against `config/env.schema.json`, and refuses to continue when `.vercel/project.json` does not match `config/deployment.json`. CI itself runs `verify:ci` only.
 
-### 3. Add environment variables
-In Vercel project settings → Environment Variables, add all variables from `.env.local` above.
+Environment variables for Preview and Production are set in the Vercel project, not in git. Postgres is the production database. The OAuth client needs this authorised redirect URI:
 
-### 4. Add Vercel Postgres
-- In Vercel dashboard → Storage → Create Postgres database
-- Vercel auto-adds `POSTGRES_URL` to environment variables
+`https://atelier-sales-preview.vercel.app/api/auth/callback`
 
-### 5. Update OAuth redirect URI
-In Google Cloud Console → OAuth2 credentials → Add authorised redirect URI:
-https://your-vercel-url.vercel.app/api/auth/callback
-
-### 6. Deploy
-Production releases use the identity in `config/deployment.json` and must pass `npm run verify:release`, an isolated Preview smoke test and the production canary.
+There is no post-deploy canary workflow in the repo yet. See [doc/ROADMAP.md](doc/ROADMAP.md).
 
 ---
 
 ## API Endpoint Reference
 
 ### POST /api/research
-Researches a brand using Claude + web search and returns an ICP dossier.
+Researches a brand using the OpenAI Responses API with web search and returns an ICP dossier.
 
 **Request:**
 ```json
@@ -226,9 +220,9 @@ Saves a lead to the Google Sheets pipeline.
 
 ## Google Sheets Integration
 
-- **Sheet ID:** `1t2dGrIg9sQYGuqhU38qYcHBRM9XYmk3LFa_k_mA4cd8`
+- **Sheet ID:** the `GOOGLE_SHEETS_ID` environment variable. It is not stored in the repository.
 - **Tab name:** `Sheet1`
-- **Column layout (A–P):**
+- **Column layout (A–Q), as written by `lib/sheets.ts`:**
 
 | Col | Field |
 |-----|-------|
@@ -248,6 +242,7 @@ Saves a lead to the Google Sheets pipeline.
 | N | Date Added |
 | O | Status |
 | P | Notes |
+| Q | Sent by |
 
 - **Service account:** Must have Editor access to the sheet. Share the sheet with the service account email found in the JSON credentials file.
 - **Auth:** The `GOOGLE_SERVICE_ACCOUNT` env var contains the full service account JSON as a string.
@@ -265,9 +260,10 @@ Saves a lead to the Google Sheets pipeline.
 | `GOOGLE_SHEETS_ID` | Pipeline spreadsheet ID | From the Google Sheets URL |
 | `GOOGLE_SERVICE_ACCOUNT` | Full service account JSON string | Google Cloud Console → Service Accounts |
 | `LUSHA_API_KEY` | Lusha contact enrichment key | https://dashboard.lusha.com |
-| `JWT_SECRET` | Secret for signing session cookies | Any random string (min 32 chars) |
-| `PRODUCTION_URL` | Live Vercel URL | Vercel dashboard |
-| `POSTGRES_URL` | Vercel Postgres connection string | Auto-added by Vercel |
+| `JWT_SECRET` | Secret for signing session cookies | A new random string (min 32 chars). Rotation signs everyone out. |
+| `CRON_SECRET` | Bearer token for `/api/cron/send-scheduled-emails` | A new random string, distinct per environment. Optional in the schema; the cron route rejects calls without it. |
+| `PRODUCTION_URL` | Base URL used to build the OAuth callback | The deployment origin, for example `https://atelier-sales-preview.vercel.app` |
+| `POSTGRES_URL` | Postgres connection string | The database connected to that Vercel environment |
 
 > **Important:** Never commit `.env.local` to GitHub. It is already in `.gitignore`.
 
@@ -295,17 +291,16 @@ Brands are scored out of 100 across 5 criteria:
 - Brand research with live web search and ICP scoring
 - Gmail OAuth with per-user sending
 - Lusha contact enrichment with on-demand reveal
-- Google Sheets pipeline sync
+- Google Sheets append after an immediate send, with `pipeline_synced` on the send response
 - Follow-up reminders for Sent leads 7+ days old
 - Industry signals, market pulse, trend matching
 - Outreach timing recommendations with web search
 - Celebrity and influencer brand signal detection
 
 ### Known issues
-- **Malformed JSON on obscure brands:** Claude occasionally returns malformed JSON for brands with very limited public data. The tool catches this and returns a `data_quality: insufficient` flag
-- **Lusha placeholder contacts:** Brands with no Lusha coverage return placeholder contacts — these are filtered from the UI but Lusha credits are still consumed on the lookup
-- **Cached dossiers:** Old dossiers cached in Vercel Postgres won't have the `competitors` field or updated ICP scoring — clear cache via `/api/clear-cache` after major prompt updates
-- **SavedCount badge:** The sidebar saved brands count only updates on full page refresh
+- **Cached dossiers:** Dossiers already stored in Postgres keep the JSON written at research time. Re-research a brand after scoring or prompt changes rather than assuming old rows gained new fields.
+- **Saved-brands badge:** The sidebar count refreshes when the route changes. An in-page save does not update it until the next navigation.
+- **Scheduled pipeline sync:** A scheduled send can be accepted by Gmail and still fail to append the Sheets row. The job stays `sent`. See [doc/ROADMAP.md](doc/ROADMAP.md).
 - **Gmail OAuth re-auth:** Sessions expire after 30 days — users need to re-authenticate via `/api/auth/gmail`
 - **Industry signals API cost:** Auto-loads on every dashboard open — consider caching results daily to reduce API costs
 
@@ -317,7 +312,6 @@ Brands are scored out of 100 across 5 criteria:
 - Dark mode
 - Bulk pipeline status update
 - Email sequence generator (3-email sequence in one click)
-- Timezone-aware send time recommendations
 
 ---
 
@@ -325,7 +319,7 @@ Brands are scored out of 100 across 5 criteria:
 
 - [ ] **Live URL:** https://atelier-sales-preview.vercel.app
 - [ ] **GitHub repo:** https://github.com/roryatelier/atelier-sales-tool
-- [ ] **Google Sheets pipeline:** https://docs.google.com/spreadsheets/d/1t2dGrIg9sQYGuqhU38qYcHBRM9XYmk3LFa_k_mA4cd8
+- [ ] **Google Sheets pipeline:** the spreadsheet in `GOOGLE_SHEETS_ID`, shared with the service account as an editor
 - [ ] **Vercel project:** `atelier-sales-preview` (`prj_SYLwZGYtiQQryVAMB5n0aAUALEnj`)
 - [ ] **Service account credentials:** Held and rotated by a designated Atelier administrator
 - [ ] **OpenAI API key:** In Vercel environment variables — rotate via https://platform.openai.com/api-keys
@@ -416,8 +410,8 @@ API Routes (/api/*)
 └─────────────────────────────────────┘
 
 ### Error flows
-- **Claude returns malformed JSON:** Caught by regex JSON extractor, returns `data_quality: insufficient`
-- **Lusha returns no contacts:** Returns placeholder contacts, filtered from UI, empty state shown with LinkedIn links
-- **Gmail OAuth expired:** API returns `reauth: true`, UI shows re-authenticate banner
-- **Google Sheets API error:** Logged server-side, UI shows save failed message
-- **Brand not found:** Claude web search returns limited data, `data_quality: insufficient` warning shown on dossier
+- **Research cannot support a dossier:** The structured response sets `data_quality: insufficient`
+- **Lusha returns no contacts:** Empty status, no fabricated people. The UI shows an empty state.
+- **Gmail OAuth expired:** API returns `reauth: true`, UI shows a re-authenticate banner
+- **Google Sheets API error:** Immediate send reports whether the pipeline append succeeded. Scheduled send records Gmail acceptance even if the Sheets append fails; that sync gap is still open (`doc/ROADMAP.md`).
+- **Brand not found:** Limited public data comes back as `data_quality: insufficient` on the dossier
