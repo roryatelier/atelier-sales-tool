@@ -1,22 +1,11 @@
+import { buildHtmlEmailRaw } from './email-mime'
+
 const REDIRECT_URI = process.env.PRODUCTION_URL
   ? `${process.env.PRODUCTION_URL}/api/auth/callback`
   : 'http://localhost:3000/api/auth/callback'
 
 export function makeEmailRaw(to: string, subject: string, body: string, cc?: string, bcc?: string): string {
-  const ccAddr = cc ? cc.split(',').map(e => e.trim()).filter(Boolean).join(', ') : ''
-  const bccAddr = bcc ? bcc.split(',').map(e => e.trim()).filter(Boolean).join(', ') : ''
-  const encSubject = `=?UTF-8?B?${Buffer.from(subject, 'utf-8').toString('base64')}?=`
-  const headers = [
-    `To: ${to}`,
-    ...(ccAddr ? [`Cc: ${ccAddr}`] : []),
-    ...(bccAddr ? [`Bcc: ${bccAddr}`] : []),
-    `Subject: ${encSubject}`,
-    'Content-Type: text/plain; charset=utf-8',
-    'Content-Transfer-Encoding: quoted-printable',
-    '',
-    body,
-  ]
-  return Buffer.from(headers.join('\n')).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+  return buildHtmlEmailRaw(to, subject, body, cc, bcc)
 }
 
 export async function refreshGmailToken(refreshToken: string): Promise<string | null> {

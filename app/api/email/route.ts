@@ -5,6 +5,8 @@ import { canonicaliseEmailRole } from '@/lib/email-role'
 import { generateEmailWithOpenAI, generatePitchWithOpenAI, type OpenAIUsage } from '@/lib/openai-email'
 import { NextRequest, NextResponse } from 'next/server'
 
+const SIGNATURE_RULE = 'Do not write a signature block and do not invent a job title, phone number, email address, or website. A saved signature is appended after generation and is not part of this task.'
+
 const MESSAGE_MATRIX: Record<string, { focus: string; proofPoints: string }> = {
   General: {
     focus: 'Growth, innovation capacity, and bringing products to market efficiently',
@@ -90,7 +92,8 @@ function buildEmailPrompt(dossier: Record<string, unknown>, role: string, canoni
       (followUp ? 'FOLLOW-UP CONTEXT — the original email was sent on ' + (followUp.date_sent ?? 'a few days ago') + ' with subject "' + (followUp.original_subject ?? 'our previous email') + '". Reference that outreach briefly and add a new useful angle instead of repeating it. Do not claim an attachment is included unless one is actually provided separately by the sender.\n\n' : '') +
       'INSTRUCTIONS\n' +
       'Rewrite the template above for this specific brand and contact. Keep the same tone, structure, and length as the template — do not add or remove paragraphs, do not change the style. Replace generic placeholders only with verified facts supplied above. Address the recipient by first name. End with a soft CTA asking for a call. You MUST mention the brand name ' + dossier.brand_name + ' at least once in the email body.\n' +
-      (senderName ? 'Sign off with "Thanks," or "Best," followed by the sender\'s name: ' + senderName + '. Do not include a position or title.' : 'Sign off with just "Thanks," with no name.') + '\n\n' +
+      (senderName ? 'Sign off with "Thanks," or "Best," followed by the sender\'s name: ' + senderName + '. Do not include a position or title.' : 'Sign off with just "Thanks," with no name.') + '\n' +
+      'SIGNATURE RULE\n' + SIGNATURE_RULE + '\n\n' +
       'OUTPUT FORMAT\n' +
       'Return valid JSON only. No preamble, no markdown fences. Begin with { and end with }.\n' +
       '{ "subject": "string", "body": "string" }'
@@ -122,7 +125,8 @@ function buildEmailPrompt(dossier: Record<string, unknown>, role: string, canoni
     '3. Weave in 1-2 relevant proof points naturally.\n' +
     '4. Address recipient by first name.\n' +
     '5. End with a soft CTA asking for a call.\n' +
-    (senderName ? '6. Sign off with "Thanks," or "Best," followed by the sender\'s name: ' + senderName + '. Do not include a position or title.\n' : '6. Sign off with just "Thanks," with no name.\n') + '\n' +
+    (senderName ? '6. Sign off with "Thanks," or "Best," followed by the sender\'s name: ' + senderName + '. Do not include a position or title.\n' : '6. Sign off with just "Thanks," with no name.\n') +
+    '7. ' + SIGNATURE_RULE + '\n\n' +
     'TONE: Conversational but professional. Write like a human, not a press release. No bullet points. No jargon.\n' +
     'SUBJECT LINE: Specific and curiosity-driven. Reference the brand or a signal. Under 8 words.\n' +
     'REQUIREMENT: You MUST mention the brand name ' + dossier.brand_name + ' at least once in the email body.\n\n' +

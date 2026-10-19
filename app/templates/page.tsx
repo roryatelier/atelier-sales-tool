@@ -1,6 +1,7 @@
 'use client'
 
 import { userStorage } from '@/lib/browser-storage'
+import { SIGNATURE_MAX_LENGTH } from '@/lib/email-signature'
 
 import { useEffect, useState } from 'react'
 
@@ -50,10 +51,18 @@ export default function TemplatesPage() {
   const [savedGuidance, setSavedGuidance] = useState('')
   const [savingGuidance, setSavingGuidance] = useState(false)
   const [guidanceError, setGuidanceError] = useState('')
+  const [signature, setSignature] = useState('')
+  const [savedSignature, setSavedSignature] = useState('')
+  const [signatureLoaded, setSignatureLoaded] = useState(false)
+  const [savingSignature, setSavingSignature] = useState(false)
+  const [signatureError, setSignatureError] = useState('')
 
   useEffect(() => {
     document.title = 'Templates — Atelier'
-    void fetchTemplates().then(fetchGuidance)
+    void fetchTemplates().then(() => {
+      void fetchGuidance()
+      void fetchSignature()
+    })
   }, [])
 
   async function fetchTemplates() {
@@ -77,6 +86,44 @@ export default function TemplatesPage() {
       setSavedGuidance(data.guidance)
     } catch {
       setGuidanceError('Email guidance could not be loaded. Refresh and try again.')
+    }
+  }
+
+  async function fetchSignature() {
+    try {
+      const res = await fetch('/api/signature')
+      const data = await res.json()
+      if (!res.ok || !data.success || typeof data.signature !== 'string') throw new Error('Signature unavailable')
+      setSignature(data.signature)
+      setSavedSignature(data.signature)
+      setSignatureLoaded(true)
+    } catch {
+      setSignatureError('Signature could not be loaded. Refresh and try again.')
+    }
+  }
+
+  async function saveSignature() {
+    if (!signatureLoaded || signature === savedSignature) return
+    if (signature.length > SIGNATURE_MAX_LENGTH) {
+      setSignatureError('Signature is too long.')
+      return
+    }
+    setSavingSignature(true)
+    setSignatureError('')
+    try {
+      const res = await fetch('/api/signature', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ signature })
+      })
+      const data = await res.json()
+      if (!res.ok || !data.success || typeof data.signature !== 'string') throw new Error('Signature update failed')
+      setSignature(data.signature)
+      setSavedSignature(data.signature)
+    } catch {
+      setSignatureError('Signature could not be saved. Your changes remain in this editor.')
+    } finally {
+      setSavingSignature(false)
     }
   }
 
@@ -180,7 +227,7 @@ export default function TemplatesPage() {
           + New template
         </button>
       </div>
-      <p className="page-sub" style={{ marginBottom: 24 }}>Edit the guidance and role-based templates used by the email generator.</p>
+      <p className="page-sub" style={{ marginBottom: 24 }}>Edit the guidance, your signature, and role-based templates used by the email generator.</p>
 
       <div className="card" style={{ marginBottom: 24 }}>
         <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 24, marginBottom: 12 }}>
@@ -204,6 +251,31 @@ export default function TemplatesPage() {
           aria-label="Email generator guidance"
         />
         {guidanceError && <div style={{ color: 'var(--red-400)', fontSize: 12, marginTop: 8 }}>{guidanceError}</div>}
+      </div>
+
+      <div id="signature" className="card" style={{ marginBottom: 24 }}>
+        <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 24, marginBottom: 12 }}>
+          <div>
+            <div className="section-label" style={{ marginBottom: 6 }}>Signature</div>
+            <div style={{ color: 'var(--slate-400)', fontSize: 13 }}>Saved for the signed-in Google account and appended after each draft. Line breaks and links such as [site](https://example.invalid) are kept.</div>
+          </div>
+          <button
+            onClick={saveSignature}
+            disabled={!signatureLoaded || savingSignature || signature === savedSignature || signature.length > SIGNATURE_MAX_LENGTH}
+            className="btn btn-primary btn-sm"
+          >
+            {savingSignature ? 'Saving...' : signature === savedSignature ? 'Saved' : 'Save signature'}
+          </button>
+        </div>
+        <textarea
+          value={signature}
+          onChange={event => setSignature(event.target.value)}
+          rows={6}
+          className="textarea"
+          aria-label="Email signature"
+          placeholder={'Thanks,\nYour name\n[site](https://example.invalid)'}
+        />
+        {signatureError && <div style={{ color: 'var(--red-400)', fontSize: 12, marginTop: 8 }}>{signatureError}</div>}
       </div>
 
       {showForm && (

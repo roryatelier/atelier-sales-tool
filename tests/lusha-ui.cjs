@@ -10,7 +10,7 @@ const { SignJWT } = require('jose');
 test('real contacts and composer: pagination, explicit reveal, manual choice and exact handoff', {timeout:180000}, async () => {
   const root=path.resolve(__dirname,'..'); const fixture=fs.mkdtempSync(path.join(os.tmpdir(),'atelier-lusha-ui-'));
   const tracked=execFileSync('git',['ls-files','-z'],{cwd:root}).toString().split('\0').filter(Boolean);
-  const extra=['lib/lusha.ts','lib/lusha-contact.ts','app/components/useLushaContacts.ts','app/components/ContactEmailActions.tsx'];
+  const extra=['lib/lusha.ts','lib/lusha-contact.ts','app/components/useLushaContacts.ts','app/components/ContactEmailActions.tsx','lib/email-signature.ts'];
   for(const relative of [...new Set([...tracked,...extra])]) {
     if(relative.startsWith('tests/')||relative.startsWith('.env')||relative==='atelier.db'||relative.includes('service-account'))continue;
     const file=path.join(root,relative); if(!fs.existsSync(file))continue;
@@ -50,7 +50,7 @@ test('real contacts and composer: pagination, explicit reveal, manual choice and
     assert.equal(await page.locator('input').evaluateAll(inputs=>inputs.find(i=>i.value==='Atelier × Fixture Brand')?.value),'Atelier × Fixture Brand');
     assert.match(await page.locator('textarea').inputValue(),/^Hi Contact,/);
     const backgroundDraft=page.waitForResponse(response=>response.url().endsWith('/api/email')&&response.request().postDataJSON().contact_name==='there');
-    await page.getByRole('button',{name:'+',exact:true}).click();
+    await page.getByRole('button',{name:'New email tab',exact:true}).click();
     await page.getByText('Fixture Brand · Contact',{exact:true}).click();
     await backgroundDraft;
     await page.waitForFunction(()=>{
