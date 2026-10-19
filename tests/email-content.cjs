@@ -8,6 +8,7 @@ const loadTypeScript = require('./load-ts.cjs')
 const root = path.resolve(__dirname, '..')
 const roles = loadTypeScript('../lib/email-role.ts')
 const content = loadTypeScript('../lib/email-content.ts', { process: { env: {} } })
+const provenance = loadTypeScript('../lib/email-template-provenance.ts')
 
 test('real prospect titles map to the intended outreach group', () => {
   const examples = {
@@ -79,6 +80,34 @@ test('manual templates override automatic recovery and unknown titles do not rec
   assert.doesNotMatch(route, /weave at least two/i)
   assert.match(route, /FOLLOW-UP CONTEXT/)
   assert.match(route, /Do not claim an attachment is included/)
+})
+
+test('draft provenance distinguishes selected, automatic, template-free and fallback drafts', () => {
+  assert.equal(
+    JSON.stringify(provenance.generatedDraftProvenance({
+      apiTemplateName: 'Manual selection',
+      selectedTemplateName: 'Founder introduction',
+      apiRoleGroup: 'CEO',
+      requestedRole: 'Founder & CEO'
+    })),
+    JSON.stringify({ kind: 'manual-template', templateName: 'Founder introduction', roleGroup: 'CEO' })
+  )
+  assert.equal(
+    JSON.stringify(provenance.generatedDraftProvenance({
+      apiTemplateName: 'CMO outreach',
+      apiRoleGroup: 'CMO',
+      requestedRole: 'Marketing Director'
+    })),
+    JSON.stringify({ kind: 'automatic-template', templateName: 'CMO outreach', roleGroup: 'CMO' })
+  )
+  assert.equal(
+    JSON.stringify(provenance.generatedDraftProvenance({ requestedRole: 'General Manager' })),
+    JSON.stringify({ kind: 'no-template', templateName: null, roleGroup: 'General Manager' })
+  )
+  assert.equal(
+    JSON.stringify(provenance.fallbackDraftProvenance('COO')),
+    JSON.stringify({ kind: 'fallback', templateName: null, roleGroup: 'COO' })
+  )
 })
 
 test('template recovery is a one-time migration so user edits and deletions persist', () => {
