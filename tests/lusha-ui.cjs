@@ -21,7 +21,7 @@ test('real contacts and composer: pagination, explicit reveal, manual choice and
   for(const relative of tracked.filter(p=>p.startsWith('app/api/')&&p.endsWith('/route.ts')&&!p.includes('lookup-contacts')&&!p.includes('/me/'))) {
     const dest=path.join(fixture,relative);
     const body=relative==='app/api/email/route.ts'
-      ? "import {NextResponse} from 'next/server'; export async function POST(){return NextResponse.json({error:'fixture provider unavailable'},{status:500})}"
+      ? "import {NextResponse} from 'next/server'; export async function POST(request){const body=await request.json();if(body.contact_name==='there')await new Promise(resolve=>setTimeout(resolve,750));return NextResponse.json({error:'fixture provider unavailable'},{status:500})}"
       : "import {NextResponse} from 'next/server'; const data={success:true,history:[],templates:[]}; export async function GET(){return NextResponse.json(data)} export async function POST(){return NextResponse.json(data)}";
     fs.writeFileSync(dest,body);
   }
@@ -49,6 +49,19 @@ test('real contacts and composer: pagination, explicit reveal, manual choice and
     await page.getByText('AI draft unavailable — a basic editable draft has been created. Review and personalise it before sending.',{exact:true}).waitFor();
     assert.equal(await page.locator('input').evaluateAll(inputs=>inputs.find(i=>i.value==='Atelier × Fixture Brand')?.value),'Atelier × Fixture Brand');
     assert.match(await page.locator('textarea').inputValue(),/^Hi Contact,/);
+    const backgroundDraft=page.waitForResponse(response=>response.url().endsWith('/api/email')&&response.request().postDataJSON().contact_name==='there');
+    await page.getByRole('button',{name:'New email tab',exact:true}).click();
+    await page.getByText('Fixture Brand · Contact',{exact:true}).click();
+    await backgroundDraft;
+    await page.waitForFunction(()=>{
+      const key=Object.keys(localStorage).find(item=>item.endsWith(':email_tabs'));if(!key)return false;
+      const stored=JSON.parse(localStorage.getItem(key));return stored.tabs.some(tab=>tab.id==='tab-1'&&tab.draftProvenance?.kind==='fallback'&&tab.email?.subject==='Atelier × Fixture Brand');
+    });
+    await page.evaluate(()=>{const key=Object.keys(localStorage).find(item=>item.endsWith(':selected_contact'));if(key)localStorage.removeItem(key)});
+    await page.getByRole('link',{name:'Edit templates'}).click();await page.waitForURL('**/templates');
+    await page.goBack();await page.waitForURL('**/email');
+    assert.equal(await page.evaluate(()=>{const key=Object.keys(localStorage).find(item=>item.endsWith(':email_tabs'));if(!key)return false;const stored=JSON.parse(localStorage.getItem(key));return stored.tabs.some(tab=>tab.id==='tab-1'&&tab.draftProvenance?.kind==='fallback'&&tab.email?.subject==='Atelier × Fixture Brand')}),true);
+    await page.getByText('Fixture Brand · Contact',{exact:true}).click();
     await page.getByRole('button',{name:'Additional contacts'}).click();await page.getByText('50 contacts loaded',{exact:true}).waitFor();
     await page.getByRole('button',{name:'Load more',exact:true}).click();await page.getByText('95 contacts loaded',{exact:true}).waitFor();
     await page.getByText('Contact 2',{exact:true}).locator('..').getByRole('button',{name:'Reveal email',exact:true}).click();await page.getByRole('alert').filter({hasText:'credits'}).waitFor();

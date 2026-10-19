@@ -243,7 +243,9 @@ export async function POST(request: NextRequest) {
       success: true,
       email: result.email,
       role_group: canonicalRole,
-      template_used: template ? 'Manual selection' : recoveredTemplate?.name ?? null
+      template_used: template
+        ? (typeof template.name === 'string' && template.name.trim() ? template.name.trim() : 'Manual selection')
+        : recoveredTemplate?.name ?? null
     })
 
   } catch (error) {
