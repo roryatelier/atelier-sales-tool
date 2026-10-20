@@ -52,6 +52,7 @@ export default function TemplatesPage() {
   const [savingGuidance, setSavingGuidance] = useState(false)
   const [guidanceError, setGuidanceError] = useState('')
   const [guidanceFallback, setGuidanceFallback] = useState(false)
+  const [guidanceOriginUnknown, setGuidanceOriginUnknown] = useState(false)
   const [signature, setSignature] = useState('')
   const [savedSignature, setSavedSignature] = useState('')
   const [signatureLoaded, setSignatureLoaded] = useState(false)
@@ -88,6 +89,7 @@ export default function TemplatesPage() {
       // Disclose when the generator is running on default guidance because no saved
       // guidance exists (defensive: older responses simply omit the field).
       setGuidanceFallback(data.guidance_source === 'default')
+      setGuidanceOriginUnknown(data.guidance_source === 'unknown')
       // Fallback content counts as unsaved so the user can persist the built-in
       // guidance as-is; otherwise the editor's Save button stays disabled.
       setSavedGuidance(data.guidance_source === 'default' ? '' : data.guidance)
@@ -151,6 +153,7 @@ export default function TemplatesPage() {
       // The PUT created stored guidance, so the editor is no longer running on the
       // built-in default.
       setGuidanceFallback(false)
+      setGuidanceOriginUnknown(false)
     } catch {
       setGuidanceError('Email guidance could not be saved. Your changes remain in this editor.')
     } finally {
@@ -264,6 +267,9 @@ export default function TemplatesPage() {
           <div style={{ color: 'var(--orange-400)', fontSize: 12, marginTop: 8 }}>
             No saved guidance is available yet — the generator is using built-in default guidance. Save this editor's content to replace it.
           </div>
+        )}
+        {guidanceOriginUnknown && !guidanceError && (
+          <div style={{ fontSize: 12, marginTop: 8 }}>Existing guidance is in use. Its original source was not recorded.</div>
         )}
         {guidanceError && <div style={{ color: 'var(--red-400)', fontSize: 12, marginTop: 8 }}>{guidanceError}</div>}
       </div>
