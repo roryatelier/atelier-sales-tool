@@ -186,7 +186,12 @@ test('save a signature, generate, regenerate, and preview the same signature on 
     await page.getByRole('button', { name: 'Send email' }).click()
     await page.locator('.modal-foot').getByRole('button', { name: 'Confirm send' }).click()
     await page.getByText('Something went wrong. Please try again.').waitFor()
-    await page.locator('input.input').first().fill('Changed fixture subject')
+    const subject = page.locator('label.field-label', { hasText: /^Subject$/ }).locator('..').locator('input')
+    await subject.fill('Changed fixture subject')
+    await page.waitForFunction(() => {
+      const label = [...document.querySelectorAll('label.field-label')].find(node => node.textContent === 'Subject')
+      return label?.parentElement?.querySelector('input')?.value === 'Changed fixture subject'
+    })
     await page.getByRole('button', { name: 'Send email' }).click()
     await page.locator('.modal-foot').getByRole('button', { name: 'Confirm send' }).click()
     await page.getByText('Email sent successfully').waitFor()
