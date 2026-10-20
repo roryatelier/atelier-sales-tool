@@ -12,6 +12,9 @@ let providerCalls = 0;
 let sheetsShouldFail = false;
 let gmailSendErrors = [];
 let gmailSendCalls = 0;
+let gmailSendReturnId = 'test-message-id';
+let gmailSendDelay = 0;
+let pgFailureQueue = [];
 let refreshCalls = 0;
 let externalFetch = async () => { throw new Error('Unexpected external call'); };
 let tokenData = { access_token: 'test-access' };
@@ -31,7 +34,7 @@ class MockGoogleAuth {}
 const google = {
   auth: { OAuth2: MockOAuth, GoogleAuth: MockGoogleAuth },
   oauth2: () => ({ userinfo: { get: async () => ({ data: userData }) } }),
-  gmail: () => ({ users: { messages: { send: async () => { providerCalls++; gmailSendCalls++; const error = gmailSendErrors.shift(); if (error) throw error; return { data: { id: 'test-message-id' } }; } } } }),
+  gmail: () => ({ users: { messages: { send: async () => { providerCalls++; gmailSendCalls++; const error = gmailSendErrors.shift(); if (error) throw error; if (gmailSendDelay) await new Promise(resolve => setTimeout(resolve, gmailSendDelay)); return { data: { id: gmailSendReturnId } }; } } } }),
   sheets: () => ({ spreadsheets: { values: { append: async () => { if (sheetsShouldFail) throw new Error('Sheets unavailable'); } } } }),
 };
 const dbMock = {
@@ -54,6 +57,41 @@ function load(relative) {
       if (name === 'next/server') return require('next/server');
       if (name === 'next/headers') return { cookies: async () => ({ get: name => cookieValues[name] ? { value: cookieValues[name] } : undefined }) };
       if (name === 'googleapis') return { google };
+      if (name === '@vercel/postgres') return {
+        sql: async (strings, ...values) => {
+          providerCalls++;
+          const failure = pgFailureQueue.shift();
+          if (failure) throw failure;
+          const text = Array.isArray(strings) ? strings.join('?') : String(strings);
+          if (text.includes('INSERT INTO send_records')) {
+            const requestId = values[2];
+            if (pgStore.has(requestId)) return { rows: [], rowCount: 0 };
+            pgStore.set(requestId, { owner: values[0], status: values[4] ?? 'recorded', messageId: null, hash: values[3] });
+            return { rows: [], rowCount: 1 };
+          }
+          if (text.includes('UPDATE send_records SET status') && text.includes('RETURNING id')) {
+            // Claim: one row moves recorded -> sending.
+            for (const record of pgStore.values()) if (record.owner === values[1] && record.status === 'recorded') { record.status = 'sending'; return { rows: [], rowCount: 1 }; }
+            return { rows: [], rowCount: 0 };
+          }
+          if (text.includes('UPDATE send_records SET status')) {
+            const record = [...pgStore.values()].find(r => r.owner === values[6]);
+            if (record) { record.status = values[0]; record.messageId = values[1]; }
+            return { rows: [], rowCount: 1 };
+          }
+          if (text.includes('FROM send_records')) {
+            // values.length === 1 -> global request-id lookup; otherwise owner-scoped.
+            const requestId = values.length === 1 ? values[0] : values[1];
+            const owner = values.length === 1 ? undefined : values[0];
+            const record = pgStore.get(requestId);
+            if (record && (owner === undefined || record.owner === owner)) {
+              return { rows: [{ id: 1, status: record.status, gmail_message_id: record.messageId, last_error_code: null, payload_hash: record.hash, owner_google_sub: record.owner }], rowCount: 1 };
+            }
+            return { rows: [], rowCount: 0 };
+          }
+          return { rows: [], rowCount: 0 };
+        },
+      };
       if (name === '@/lib/db') return dbMock;
       if (name.startsWith('@/')) return load(name.slice(2) + '.ts');
       if (name.startsWith('.')) return load(path.relative(root, path.resolve(path.dirname(filename), name)) + '.ts');
@@ -214,9 +252,15 @@ test('account-owned browser storage blocks old tabs and clears legacy and foreig
 });
 
 test('direct sends reject stale sender identity and invalid headers before Gmail', async () => {
+  const Database = require('better-sqlite3');
+  const dbPath = path.join(require('node:os').tmpdir(), `atelier-send-direct-${process.pid}.db`);
+  fs.rmSync(dbPath, { force: true });
+  dbMock.initialiseDb = async () => { const db = new Database(dbPath); db.exec(SEND_RECORDS_SCHEMA); db.close(); };
+  dbMock.getLocalDb = () => new Database(dbPath);
+  try {
   cookieValues = { atelier_session: await policy.signSession(user), atelier_gmail: await policy.sealGmailCredentials({ ...user, accessToken: 'test-access' }) };
   const send = load('app/api/send-email/route.ts').POST;
-  const valid = { expectedGoogleSub: user.googleSub, to: 'contact@example.invalid', subject: 'Hello', emailBody: 'Body', contactName: 'Contact' };
+  const valid = { expectedGoogleSub: user.googleSub, request_id: 'aaaaaaaa-0000-4000-8000-000000000001', to: 'contact@example.invalid', subject: 'Hello', emailBody: 'Body', contactName: 'Contact' };
   const request = body => new NextRequest('https://example.invalid/api/send-email', { method: 'POST', headers: { origin: 'https://example.invalid', 'content-type': 'application/json' }, body: JSON.stringify(body) });
   const before = providerCalls;
   assert.equal((await send(request({ ...valid, expectedGoogleSub: 'old-account' }))).status, 409);
@@ -237,21 +281,31 @@ test('direct sends reject stale sender identity and invalid headers before Gmail
   env.GOOGLE_SERVICE_ACCOUNT = '{}';
   env.GOOGLE_SHEETS_ID = 'test-sheet';
   sheetsShouldFail = true;
-  const partialResponse = await send(request({ ...valid, dossier: { brand_name: 'Test Brand' } }));
+  const partialResponse = await send(request({ ...valid, dossier: { brand_name: 'Test Brand' }, request_id: 'aaaaaaaa-0000-4000-8000-000000000002' }));
   assert.equal(partialResponse.status, 200);
   assert.equal((await partialResponse.json()).pipeline_synced, false);
   sheetsShouldFail = false;
-  const syncedResponse = await send(request({ ...valid, dossier: { brand_name: 'Test Brand' } }));
+  const syncedResponse = await send(request({ ...valid, dossier: { brand_name: 'Test Brand' }, request_id: 'aaaaaaaa-0000-4000-8000-000000000003' }));
   assert.equal(syncedResponse.status, 200);
   assert.equal((await syncedResponse.json()).pipeline_synced, true);
   delete env.GOOGLE_SERVICE_ACCOUNT;
   delete env.GOOGLE_SHEETS_ID;
+  } finally {
+    fs.rmSync(dbPath, { force: true });
+  }
 });
 
 test('direct sends return safe actionable Gmail failures and only retry explicit authentication rejection', async () => {
+  const Database = require('better-sqlite3');
+  const dbPath = path.join(require('node:os').tmpdir(), `atelier-send-failures-${process.pid}.db`);
+  fs.rmSync(dbPath, { force: true });
+  dbMock.initialiseDb = async () => { const db = new Database(dbPath); db.exec(SEND_RECORDS_SCHEMA); db.close(); };
+  dbMock.getLocalDb = () => new Database(dbPath);
+  try {
   cookieValues = { atelier_session: await policy.signSession(user), atelier_gmail: await policy.sealGmailCredentials({ ...user, accessToken: 'expired-access', refreshToken: 'test-refresh' }) };
   const send = load('app/api/send-email/route.ts').POST;
-  const request = () => new NextRequest('https://example.invalid/api/send-email', { method: 'POST', headers: { origin: 'https://example.invalid', 'content-type': 'application/json' }, body: JSON.stringify({ expectedGoogleSub: user.googleSub, to: 'contact@example.invalid', subject: 'Hello', emailBody: 'Body' }) });
+  let requestSeq = 0;
+  const request = () => new NextRequest('https://example.invalid/api/send-email', { method: 'POST', headers: { origin: 'https://example.invalid', 'content-type': 'application/json' }, body: JSON.stringify({ expectedGoogleSub: user.googleSub, request_id: 'bbbbbbbb-0000-4000-8000-' + (++requestSeq).toString(16).padStart(12, '0'), to: 'contact@example.invalid', subject: 'Hello', emailBody: 'Body' }) });
 
   const initialSends = gmailSendCalls;
   const initialRefreshes = refreshCalls;
@@ -325,8 +379,303 @@ test('direct sends return safe actionable Gmail failures and only retry explicit
   assert.equal((await response.json()).message_id, 'test-message-id');
   policy.sealGmailCredentials = originalSeal;
 
-  gmailSendErrors = [];
-  externalFetch = async () => { throw new Error('Unexpected external call'); };
+  } finally {
+    // Restore shared state even when an assertion fails, so later tests do not
+    // inherit a broken stub.
+    gmailSendErrors = [];
+    externalFetch = async () => { throw new Error('Unexpected external call'); };
+    fs.rmSync(dbPath, { force: true });
+  }
+});
+
+const SEND_RECORDS_SCHEMA = `CREATE TABLE IF NOT EXISTS send_records (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    owner_google_sub TEXT NOT NULL,
+    owner_email TEXT NOT NULL,
+    request_id TEXT NOT NULL,
+    payload_hash TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'recorded' CHECK (status IN ('recorded','sending','accepted','failed_auth','failed','needs_review')),
+    gmail_message_id TEXT,
+    last_error_code TEXT,
+    last_error TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now')),
+    accepted_at TEXT,
+    UNIQUE (request_id),
+    CHECK (status != 'accepted' OR (gmail_message_id IS NOT NULL AND gmail_message_id != ''))
+  )`;
+const pgStore = new Map();
+function resetPgStore() { pgStore.clear(); pgFailureQueue = []; }
+
+test('immediate sends create a durable record: replay returns the original outcome without resending', async () => {
+  const Database = require('better-sqlite3');
+  const dbPath = path.join(require('node:os').tmpdir(), `atelier-send-records-${process.pid}.db`);
+  fs.rmSync(dbPath, { force: true });
+  dbMock.initialiseDb = async () => { const db = new Database(dbPath); db.exec(SEND_RECORDS_SCHEMA); db.close(); };
+  dbMock.getLocalDb = () => new Database(dbPath);
+  try {
+    cookieValues = { atelier_session: await policy.signSession(user), atelier_gmail: await policy.sealGmailCredentials({ ...user, accessToken: 'test-access' }) };
+    const send = load('app/api/send-email/route.ts').POST;
+    const requestId = '11111111-2222-3333-4444-555555555555';
+    const body = { expectedGoogleSub: user.googleSub, request_id: requestId, to: 'contact@example.invalid', subject: 'Hello', emailBody: 'Body', contactName: 'Contact' };
+    const request = () => new NextRequest('https://example.invalid/api/send-email', { method: 'POST', headers: { origin: 'https://example.invalid', 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    const sendsBefore = gmailSendCalls;
+    const first = await send(request());
+    assert.equal(first.status, 200);
+    assert.equal((await first.json()).outcome, 'accepted');
+    assert.equal(gmailSendCalls, sendsBefore + 1);
+
+    // A browser retry (same request id, same content) replays the recorded outcome.
+    const replay = await send(request());
+    assert.equal(replay.status, 200);
+    const replayBody = await replay.json();
+    assert.equal(replayBody.outcome, 'accepted');
+    assert.equal(replayBody.message_id, 'test-message-id');
+    assert.equal(replayBody.replayed, true);
+    assert.equal(gmailSendCalls, sendsBefore + 1);
+
+    // Same id with different content is rejected, never silently swapped.
+    const conflicting = await send(new NextRequest('https://example.invalid/api/send-email', { method: 'POST', headers: { origin: 'https://example.invalid', 'content-type': 'application/json' }, body: JSON.stringify({ ...body, subject: 'Different' }) }));
+    assert.equal(conflicting.status, 409);
+    assert.equal(JSON.stringify(await conflicting.json()).includes('test-message-id'), false);
+    assert.equal(gmailSendCalls, sendsBefore + 1);
+  } finally {
+    fs.rmSync(dbPath, { force: true });
+  }
+});
+
+test('concurrent identical immediate sends produce exactly one Gmail send', async () => {
+  const Database = require('better-sqlite3');
+  const dbPath = path.join(require('node:os').tmpdir(), `atelier-send-records-race-${process.pid}.db`);
+  fs.rmSync(dbPath, { force: true });
+  dbMock.initialiseDb = async () => { const db = new Database(dbPath); db.exec(SEND_RECORDS_SCHEMA); db.close(); };
+  dbMock.getLocalDb = () => new Database(dbPath);
+  try {
+    cookieValues = { atelier_session: await policy.signSession(user), atelier_gmail: await policy.sealGmailCredentials({ ...user, accessToken: 'test-access' }) };
+    const send = load('app/api/send-email/route.ts').POST;
+    const body = { expectedGoogleSub: user.googleSub, request_id: '22222222-2222-3333-4444-555555555555', to: 'contact@example.invalid', subject: 'Hello', emailBody: 'Body', contactName: 'Contact' };
+    const request = () => new NextRequest('https://example.invalid/api/send-email', { method: 'POST', headers: { origin: 'https://example.invalid', 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    const sendsBefore = gmailSendCalls;
+    gmailSendDelay = 50;
+    const [a, b] = await Promise.all([send(request()), send(request())]);
+    gmailSendDelay = 0;
+    assert.equal(gmailSendCalls, sendsBefore + 1);
+    const bodies = [await a.json(), await b.json()];
+    for (const [response, responseBody] of [[a, bodies[0]], [b, bodies[1]]]) {
+      assert.ok([200, 409].includes(response.status), 'replaying request must not fail hard');
+      if (responseBody.outcome === 'accepted') assert.equal(responseBody.message_id, 'test-message-id');
+    }
+    const db = new Database(dbPath);
+    const rows = db.prepare('SELECT request_id, status, gmail_message_id FROM send_records').all();
+    db.close();
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].status, 'accepted');
+    assert.equal(rows[0].gmail_message_id, 'test-message-id');
+  } finally {
+    fs.rmSync(dbPath, { force: true });
+  }
+});
+
+test('cross-account replay of an immediate send is isolated', async () => {
+  const Database = require('better-sqlite3');
+  const dbPath = path.join(require('node:os').tmpdir(), `atelier-send-records-cross-${process.pid}.db`);
+  fs.rmSync(dbPath, { force: true });
+  const otherAccount = { googleSub: 'google-2', email: 'other@example.invalid', name: 'Other', picture: '' };
+  const previousAllow = env.APP_ALLOWED_EMAILS;
+  env.APP_ALLOWED_EMAILS = [user.email, otherAccount.email].join(',');
+  dbMock.initialiseDb = async () => { const db = new Database(dbPath); db.exec(SEND_RECORDS_SCHEMA); db.close(); };
+  dbMock.getLocalDb = () => new Database(dbPath);
+  try {
+    cookieValues = { atelier_session: await policy.signSession(user), atelier_gmail: await policy.sealGmailCredentials({ ...user, accessToken: 'test-access' }) };
+    const send = load('app/api/send-email/route.ts').POST;
+    const body = { expectedGoogleSub: user.googleSub, request_id: '33333333-2222-3333-4444-555555555555', to: 'contact@example.invalid', subject: 'Hello', emailBody: 'Body', contactName: 'Contact' };
+    await send(new NextRequest('https://example.invalid/api/send-email', { method: 'POST', headers: { origin: 'https://example.invalid', 'content-type': 'application/json' }, body: JSON.stringify(body) }));
+    cookieValues = { atelier_session: await policy.signSession(otherAccount), atelier_gmail: await policy.sealGmailCredentials({ ...otherAccount, accessToken: 'test-access' }) };
+    const foreign = await send(new NextRequest('https://example.invalid/api/send-email', { method: 'POST', headers: { origin: 'https://example.invalid', 'content-type': 'application/json' }, body: JSON.stringify(body) }));
+    const foreignBody = await foreign.json();
+    assert.equal(JSON.stringify(foreignBody).includes('test-message-id'), false);
+    // Globally-unique request ids: a foreign replay is refused, never converted
+    // into that account's own send to the same recipient.
+    assert.ok([404, 409].includes(foreign.status), 'foreign replay must not send or expose the original record');
+    assert.equal(foreignBody.outcome, undefined);
+  } finally {
+    env.APP_ALLOWED_EMAILS = previousAllow;
+    fs.rmSync(dbPath, { force: true });
+  }
+});
+
+test('a missing Gmail message id cannot be accepted and an uncertain replay never resends', async () => {
+  const Database = require('better-sqlite3');
+  const dbPath = path.join(require('node:os').tmpdir(), `atelier-send-records-missing-${process.pid}.db`);
+  fs.rmSync(dbPath, { force: true });
+  dbMock.initialiseDb = async () => { const db = new Database(dbPath); db.exec(SEND_RECORDS_SCHEMA); db.close(); };
+  dbMock.getLocalDb = () => new Database(dbPath);
+  try {
+    cookieValues = { atelier_session: await policy.signSession(user), atelier_gmail: await policy.sealGmailCredentials({ ...user, accessToken: 'test-access' }) };
+    const send = load('app/api/send-email/route.ts').POST;
+    const body = { expectedGoogleSub: user.googleSub, request_id: '44444444-2222-3333-4444-555555555555', to: 'contact@example.invalid', subject: 'Hello', emailBody: 'Body', contactName: 'Contact' };
+    const request = () => new NextRequest('https://example.invalid/api/send-email', { method: 'POST', headers: { origin: 'https://example.invalid', 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    gmailSendReturnId = '';
+    const sendsBefore = gmailSendCalls;
+    const uncertain = await send(request());
+    assert.ok([200, 502].includes(uncertain.status));
+    assert.equal((await uncertain.json()).outcome, 'needs_review');
+    assert.equal(gmailSendCalls, sendsBefore + 1);
+    const db = new Database(dbPath);
+    const row = db.prepare('SELECT status, gmail_message_id FROM send_records').get();
+    db.close();
+    assert.equal(row.status, 'needs_review');
+    assert.equal(row.gmail_message_id, null);
+    // Replay of the uncertain request returns the same uncertainty without resending.
+    const replay = await send(request());
+    assert.equal((await replay.json()).outcome, 'needs_review');
+    assert.equal(gmailSendCalls, sendsBefore + 1);
+  } finally {
+    gmailSendReturnId = 'test-message-id';
+    fs.rmSync(dbPath, { force: true });
+  }
+});
+
+test('provider uncertainty and interruption never trigger an automatic resend', async () => {
+  const Database = require('better-sqlite3');
+  const dbPath = path.join(require('node:os').tmpdir(), `atelier-send-records-uncertain-${process.pid}.db`);
+  fs.rmSync(dbPath, { force: true });
+  dbMock.initialiseDb = async () => { const db = new Database(dbPath); db.exec(SEND_RECORDS_SCHEMA); db.close(); };
+  dbMock.getLocalDb = () => new Database(dbPath);
+  try {
+    cookieValues = { atelier_session: await policy.signSession(user), atelier_gmail: await policy.sealGmailCredentials({ ...user, accessToken: 'test-access' }) };
+    const send = load('app/api/send-email/route.ts').POST;
+    const requestId = '55555555-2222-3333-4444-555555555555';
+    const body = { expectedGoogleSub: user.googleSub, request_id: requestId, to: 'contact@example.invalid', subject: 'Hello', emailBody: 'Body', contactName: 'Contact' };
+    const request = () => new NextRequest('https://example.invalid/api/send-email', { method: 'POST', headers: { origin: 'https://example.invalid', 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    gmailSendErrors = [new Error('network failure')];
+    const sendsBefore = gmailSendCalls;
+    const uncertain = await send(request());
+    assert.ok([200, 502, 503].includes(uncertain.status));
+    assert.equal((await uncertain.json()).error, 'Gmail did not confirm this send. Check Sent mail before trying again.');
+    assert.equal(gmailSendCalls, sendsBefore + 1);
+    const replay = await send(request());
+    assert.equal((await replay.json()).error, 'Gmail did not confirm this send. Check Sent mail before trying again.');
+    assert.equal(gmailSendCalls, sendsBefore + 1);
+  } finally {
+    fs.rmSync(dbPath, { force: true });
+  }
+});
+
+test('quota failures are recorded as failed and replay never sends again', async () => {
+  const Database = require('better-sqlite3');
+  const dbPath = path.join(require('node:os').tmpdir(), `atelier-send-records-quota-${process.pid}.db`);
+  fs.rmSync(dbPath, { force: true });
+  dbMock.initialiseDb = async () => { const db = new Database(dbPath); db.exec(SEND_RECORDS_SCHEMA); db.close(); };
+  dbMock.getLocalDb = () => new Database(dbPath);
+  try {
+    cookieValues = { atelier_session: await policy.signSession(user), atelier_gmail: await policy.sealGmailCredentials({ ...user, accessToken: 'test-access' }) };
+    const send = load('app/api/send-email/route.ts').POST;
+    const body = { expectedGoogleSub: user.googleSub, request_id: '66666666-2222-3333-4444-555555555555', to: 'contact@example.invalid', subject: 'Hello', emailBody: 'Body', contactName: 'Contact' };
+    const request = () => new NextRequest('https://example.invalid/api/send-email', { method: 'POST', headers: { origin: 'https://example.invalid', 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    gmailSendErrors = [Object.assign(new Error('quota'), { response: { status: 429 } })];
+    const sendsBefore = gmailSendCalls;
+    const response = await send(request());
+    assert.equal(response.status, 429);
+    assert.equal(gmailSendCalls, sendsBefore + 1);
+    const db = new Database(dbPath);
+    const row = db.prepare('SELECT status FROM send_records').get();
+    db.close();
+    assert.equal(row.status, 'failed');
+    const replay = await send(request());
+    assert.ok([429, 502].includes(replay.status));
+    assert.equal(gmailSendCalls, sendsBefore + 1);
+  } finally {
+    fs.rmSync(dbPath, { force: true });
+  }
+});
+
+test('a lost outcome write after Gmail acceptance is reported as uncertain, never resent', async () => {
+  const Database = require('better-sqlite3');
+  const dbPath = path.join(require('node:os').tmpdir(), `atelier-send-records-postaccept-${process.pid}.db`);
+  fs.rmSync(dbPath, { force: true });
+  dbMock.initialiseDb = async () => { const db = new Database(dbPath); db.exec(SEND_RECORDS_SCHEMA); db.close(); };
+  dbMock.getLocalDb = () => new Database(dbPath);
+  try {
+    cookieValues = { atelier_session: await policy.signSession(user), atelier_gmail: await policy.sealGmailCredentials({ ...user, accessToken: 'test-access' }) };
+    const send = load('app/api/send-email/route.ts').POST;
+    const body = { expectedGoogleSub: user.googleSub, request_id: '77777777-2222-3333-4444-555555555555', to: 'contact@example.invalid', subject: 'Hello', emailBody: 'Body', contactName: 'Contact' };
+    const request = () => new NextRequest('https://example.invalid/api/send-email', { method: 'POST', headers: { origin: 'https://example.invalid', 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    const sendsBefore = gmailSendCalls;
+    // Gmail accepts, then the outcome write is interrupted (simulated by a throw
+    // inside the Gmail mock AFTER acceptance is recorded is not possible — instead
+    // the route wraps its own outcome write; simulate the lost write via a stale
+    // claim: the record stays 'sending' and the response must be uncertain).
+    const response = await send(request());
+    assert.equal(gmailSendCalls, sendsBefore + 1);
+    assert.equal((await response.json()).outcome, 'accepted');
+    // Simulate a lost outcome write: rewind the record to 'sending'.
+    const db = new Database(dbPath);
+    db.prepare("UPDATE send_records SET status = 'sending' WHERE request_id = ?").run(body.request_id);
+    db.close();
+    const replay = await send(request());
+    const replayBody = await replay.json();
+    assert.equal(replayBody.outcome, 'uncertain');
+    assert.match(String(replayBody.error), /Check Sent mail/i);
+    assert.equal(gmailSendCalls, sendsBefore + 1);
+  } finally {
+    fs.rmSync(dbPath, { force: true });
+  }
+});
+
+test('the Postgres immediate-send path never sends again after a lost outcome write', async () => {
+  dbMock.isVercel = true;
+  const previousInitialise = dbMock.initialiseDb;
+  dbMock.initialiseDb = async () => {};
+  try {
+    cookieValues = { atelier_session: await policy.signSession(user), atelier_gmail: await policy.sealGmailCredentials({ ...user, accessToken: 'test-access' }) };
+    const send = load('app/api/send-email/route.ts').POST;
+    const body = { expectedGoogleSub: user.googleSub, request_id: '88888888-2222-3333-4444-555555555555', to: 'contact@example.invalid', subject: 'Hello', emailBody: 'Body', contactName: 'Contact' };
+    const request = () => new NextRequest('https://example.invalid/api/send-email', { method: 'POST', headers: { origin: 'https://example.invalid', 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    const sendsBefore = gmailSendCalls;
+    // insert, claim, post-claim record read, outcome write (FAILS), retry (FAILS), needs_review fallback (OK)
+    pgFailureQueue = [null, null, null, new Error('db write failed after acceptance'), new Error('db write failed after acceptance'), null];
+    const response = await send(request());
+    assert.equal(gmailSendCalls, sendsBefore + 1);
+    const responseBody = await response.json();
+    assert.equal(responseBody.outcome, 'needs_review');
+    assert.match(String(responseBody.error), /Check Sent mail/i);
+    // Second request: DB remains broken — still exactly one send, still uncertain.
+    pgFailureQueue = [new Error('replay read failed'), new Error('replay read failed'), new Error('replay read failed')];
+    await send(request());
+    assert.equal(gmailSendCalls, sendsBefore + 1);
+  } finally {
+    dbMock.initialiseDb = previousInitialise;
+    dbMock.isVercel = false;
+    pgFailureQueue = [];
+  }
+});
+
+test('missing or malformed request ids fail closed before Gmail and any DB work', async () => {
+  cookieValues = { atelier_session: await policy.signSession(user), atelier_gmail: await policy.sealGmailCredentials({ ...user, accessToken: 'test-access' }) };
+  const send = load('app/api/send-email/route.ts').POST;
+  const request = body => new NextRequest('https://example.invalid/api/send-email', { method: 'POST', headers: { origin: 'https://example.invalid', 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  const base = { expectedGoogleSub: user.googleSub, to: 'contact@example.invalid', subject: 'Hello', emailBody: 'Body', contactName: 'Contact' };
+  const before = gmailSendCalls;
+  assert.equal((await send(request(base))).status, 400);
+  assert.equal((await send(request({ ...base, request_id: 'not-a-uuid' }))).status, 400);
+  assert.equal((await send(request({ ...base, request_id: 'aaaaaaaa-2222-3333-4444-55555555555  ' }))).status, 400);
+  assert.equal(gmailSendCalls, before);
+});
+
+test('immediate send records enforce global request-id uniqueness and the accepted-implies-message-id rule in both dialects', () => {
+  const source = fs.readFileSync(path.join(root, 'lib/db.ts'), 'utf8');
+  const uniques = source.match(/UNIQUE \(request_id\)/g) ?? [];
+  assert.ok(uniques.length >= 2, 'both the Postgres and SQLite schemas must make request_id globally unique');
+  const checks = source.match(/CHECK \(status != 'accepted'[^\n]*\)/g) ?? [];
+  assert.ok(checks.length >= 2, 'both dialects must enforce accepted-implies-message-id');
+  const route = fs.readFileSync(path.join(root, 'app/api/send-email/route.ts'), 'utf8');
+  assert.match(route, /ON CONFLICT \(request_id\) DO NOTHING/);
+  assert.match(route, /request_id/);
+  assert.match(route, /payload_hash/);
+  assert.match(route, /already used by another session/);
+  const gmail = fs.readFileSync(path.join(root, 'lib/gmail.ts'), 'utf8');
+  assert.match(gmail, /missing_message_id/);
 });
 
 test('signature API cannot read or write another account', async () => {

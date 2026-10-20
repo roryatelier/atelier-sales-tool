@@ -38,7 +38,13 @@ export async function sendViaGmail(accessToken: string, raw: string): Promise<st
   oauth2.setCredentials({ access_token: accessToken })
   const gmail = google.gmail({ version: 'v1', auth: oauth2 })
   const result = await gmail.users.messages.send({ userId: 'me', requestBody: { raw } })
-  return result.data.id!
+  const messageId = result.data.id
+  if (typeof messageId !== 'string' || !messageId) {
+    // A send without a message id can never be recorded as accepted; the caller
+    // treats this as an uncertain outcome that needs review, never a resend.
+    throw Object.assign(new Error('Gmail did not return a message id (missing_message_id)'), { code: 'missing_message_id' })
+  }
+  return messageId
 }
 
 export function isGmailAuthError(error: unknown): boolean {
