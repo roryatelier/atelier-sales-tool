@@ -319,7 +319,7 @@ export type DraftEmailContentProvenance = DraftEmailContent & {
 // Legacy rows keep their content but have unknown origin until explicitly saved.
 export function guidanceProvenance(stored: { content?: unknown; updated_at?: unknown; source?: unknown } | null | undefined): GuidanceProvenance {
   const content = typeof stored?.content === 'string' && stored.content.trim() ? stored.content : null
-  if (!content || stored?.source === 'default') return { source: 'default', revision: 'default' }
+  if (!content || (stored?.source === 'default' && content === DEFAULT_EMAIL_GUIDANCE)) return { source: 'default', revision: 'default' }
   const revision = typeof stored?.updated_at === 'string' && stored.updated_at.trim()
     ? stored.updated_at.trim()
     : typeof stored?.updated_at === 'object' && stored.updated_at !== null

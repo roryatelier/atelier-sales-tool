@@ -85,14 +85,13 @@ export default function TemplatesPage() {
       const data = await res.json()
       if (!res.ok || !data.success) throw new Error('Guidance unavailable')
       setGuidance(data.guidance)
-      setSavedGuidance(data.guidance)
       // Disclose when the generator is running on default guidance because no saved
       // guidance exists (defensive: older responses simply omit the field).
       setGuidanceFallback(data.guidance_source === 'default')
       setGuidanceOriginUnknown(data.guidance_source === 'unknown')
       // Fallback content counts as unsaved so the user can persist the built-in
       // guidance as-is; otherwise the editor's Save button stays disabled.
-      setSavedGuidance(data.guidance_source === 'default' ? '' : data.guidance)
+      setSavedGuidance(data.guidance_source === 'default' || data.guidance_source === 'unknown' ? '' : data.guidance)
     } catch {
       setGuidanceError('Email guidance could not be loaded. Refresh and try again.')
     }

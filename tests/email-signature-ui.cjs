@@ -24,7 +24,7 @@ test('save a signature, generate, regenerate, and preview the same signature on 
   fs.symlinkSync(path.join(root, 'node_modules'), path.join(fixture, 'node_modules'), 'dir')
   for (const relative of tracked.filter(file => file.startsWith('app/api/') && file.endsWith('/route.ts') && !file.includes('/me/') && !file.includes('/signature/'))) {
     const body = relative === 'app/api/email/route.ts'
-      ? "import {NextResponse} from 'next/server'; let draft=0; export async function POST(){draft+=1; return NextResponse.json({success:true,email:{subject:'Fixture subject '+draft,body:'Hi Fixture,\\n\\nDraft '+draft+' for Fixture Brand.\\n\\nThanks,'}})}"
+      ? "import {NextResponse} from 'next/server'; let draft=0; export async function POST(){draft+=1; return NextResponse.json({success:true,guidance_source:'unknown',guidance_revision:'fixture-revision',email:{subject:'Fixture subject '+draft,body:'Hi Fixture,\\n\\nDraft '+draft+' for Fixture Brand.\\n\\nThanks,'}})}"
       : relative === 'app/api/email-guidance/route.ts'
         ? "import {NextResponse} from 'next/server'; export async function GET(){return NextResponse.json({success:true,guidance:'Fixture guidance'})} export async function PUT(){return NextResponse.json({success:true})}"
         : "import {NextResponse} from 'next/server'; const data={success:true,history:[],templates:[],timing:null}; export async function GET(){return NextResponse.json(data)} export async function POST(){return NextResponse.json(data)} export async function PUT(){return NextResponse.json(data)} export async function DELETE(){return NextResponse.json(data)}"
@@ -75,9 +75,28 @@ test('save a signature, generate, regenerate, and preview the same signature on 
       await route.fulfill({ json: { success: true } })
     })
 
+    let guidanceSource = 'unknown'
+    let guidanceWrites = 0
+    await page.route('**/api/email-guidance', async route => {
+      if (route.request().method() === 'PUT') {
+        assert.equal(route.request().postDataJSON().guidance, 'Fixture legacy guidance')
+        guidanceWrites++
+        guidanceSource = 'stored'
+        return route.fulfill({ json: { success: true } })
+      }
+      return route.fulfill({ json: { success: true, guidance: 'Fixture legacy guidance', guidance_source: guidanceSource, guidance_revision: 'fixture-revision' } })
+    })
+
     const initialLoad = page.waitForResponse(response => response.url().endsWith('/api/signature') && response.request().method() === 'GET')
     await page.goto('http://localhost:3174/templates#signature')
     assert.equal((await initialLoad).status(), 200)
+    await page.getByText('Existing guidance is in use. Its original source was not recorded.').waitFor()
+    assert.equal(await page.getByLabel('Email generator guidance').inputValue(), 'Fixture legacy guidance')
+    const guidanceSaved = page.waitForResponse(response => response.url().endsWith('/api/email-guidance') && response.request().method() === 'PUT')
+    await page.getByRole('button', { name: 'Save guidance', exact: true }).click()
+    assert.equal((await guidanceSaved).status(), 200)
+    await page.getByText('Existing guidance is in use. Its original source was not recorded.').waitFor({ state: 'hidden' })
+    assert.equal(guidanceWrites, 1)
     const editor = page.getByLabel('Email signature')
     await editor.fill(SIGNATURE)
     const save = page.waitForResponse(response => response.url().endsWith('/api/signature') && response.request().method() === 'PUT')
@@ -95,6 +114,7 @@ test('save a signature, generate, regenerate, and preview the same signature on 
     await page.locator('textarea').waitFor()
     await page.waitForFunction(() => /Draft \d+/.test(document.querySelector('textarea')?.value || ''))
     const firstDraft = Number((await page.locator('textarea').inputValue()).match(/Draft (\d+)/)[1])
+    await page.getByText('Existing guidance (origin not recorded) · Guidance revision fixture-revision', { exact: false }).waitFor()
     await assertSignatureOnce(page)
     assert.equal((await page.locator('textarea').inputValue()).includes('Fixture User'), false)
 

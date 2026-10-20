@@ -1217,7 +1217,7 @@ export default function EmailPage() {
               : draftProvenance.guidanceSource === 'stored'
                 ? ` · Guidance revision ${draftProvenance.guidanceRevision ?? 'unknown'}`
                 : draftProvenance.guidanceSource === 'unknown'
-                  ? ' · Existing guidance (origin not recorded)'
+                  ? ` · Existing guidance (origin not recorded) · Guidance revision ${draftProvenance.guidanceRevision ?? 'unknown'}`
                   : ''}
           </div>
           <a href="/templates" style={{ color: 'var(--brand-400)', fontSize: 12, fontWeight: 500, whiteSpace: 'nowrap' }}>Edit templates →</a>
