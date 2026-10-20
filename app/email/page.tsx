@@ -492,7 +492,7 @@ export default function EmailPage() {
       }))
     } catch {}
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [email, draftProvenance, tabIds, activeTabId, tabPersistenceRevision])
+  }, [email, draftProvenance, draftInstruction, tabIds, activeTabId, tabPersistenceRevision])
 
   // Restore textarea cursor position after React commits the new email body to DOM.
   // requestAnimationFrame is unreliable in concurrent mode — useLayoutEffect fires
@@ -576,7 +576,8 @@ export default function EmailPage() {
     role: string,
     template?: ActiveTemplate | null,
     bullet?: string,
-    explicit?: { dossier: Dossier; contactName: string }
+    explicit?: { dossier: Dossier; contactName: string },
+    instructionOverride?: string
   ) {
     const activeDossier = explicit?.dossier ?? dossier
     if (!activeDossier) return
@@ -610,7 +611,9 @@ export default function EmailPage() {
           pitch_bullet: bullet ?? selectedBullet ?? undefined,
           follow_up: followUpContext ?? undefined,
           sender_name: userStorage.getItem('atelier_user_name') ?? '',
-          draft_instruction: draftInstruction || undefined
+          // A generation requested in the same event that opened a fresh tab must not
+          // read the previous tab's instruction from stale state — the override wins.
+          draft_instruction: (instructionOverride ?? draftInstruction) || undefined
         })
       })
 
@@ -696,7 +699,7 @@ export default function EmailPage() {
     // Null out pending ref and call generateEmail directly with the live contact
     // so we never use stale contact state from a previous tab
     pendingGenerateRef.current = null
-    if (dossier) generateEmail(c.role, undefined, undefined, { dossier, contactName: c.name || 'there' })
+    if (dossier) generateEmail(c.role, undefined, undefined, { dossier, contactName: c.name || 'there' }, '')
   }
 
   async function handleCopyMessage() {

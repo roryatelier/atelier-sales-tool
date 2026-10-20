@@ -203,6 +203,25 @@ test('guidance fallback is disclosed on every path, including route-level recove
   assert.match(lib, /guidanceProvenance/)
 })
 
+test('review fixes: contact-tab instruction leak, snapshot persistence, fallback notice resets', () => {
+  const page = fs.readFileSync(path.join(root, 'app/email/page.tsx'), 'utf8')
+  // 1. A generation request made in the same event as opening a new contact tab must
+  // not read the previous tab's instruction (stale closure). handleContactSelect
+  // overrides the instruction explicitly.
+  assert.match(page, /instructionOverride/, 'generateEmail must accept an instruction override')
+  assert.match(page, /generateEmail\(c\.role, undefined, undefined, \{ dossier, contactName: c\.name \|\| 'there' \}, ''\)/, 'contact-tab generation must pass an empty instruction')
+  assert.match(page, /instructionOverride \?\? draftInstruction/, 'request body must prefer the override')
+  // 2. Instruction-only edits must trigger tab persistence (dep list includes it).
+  const depsIndex = page.indexOf('}, [email, draftProvenance, draftInstruction')
+  assert.ok(depsIndex !== -1, 'persistence effect deps must include draftInstruction')
+  const templatesPage = fs.readFileSync(path.join(root, 'app/templates/page.tsx'), 'utf8')
+  // 3. Saving guidance must clear the default-fallback notice.
+  assert.match(templatesPage, /setGuidanceFallback\(false\)/, 'a successful save must clear the fallback notice')
+  // 4. When the editor loads default guidance, it must be saveable unchanged
+  // (fallback content counts as unsaved).
+  assert.match(templatesPage, /setSavedGuidance\(data\.guidance_source === 'default' \? '' : data\.guidance\)/, 'fallback guidance must not be treated as already-saved')
+})
+
 test('template recovery is a one-time migration so user edits and deletions persist', () => {
   const source = fs.readFileSync(path.join(root, 'lib/email-content.ts'), 'utf8')
   assert.match(source, /content_migrations/)

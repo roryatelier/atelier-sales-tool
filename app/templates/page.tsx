@@ -88,6 +88,9 @@ export default function TemplatesPage() {
       // Disclose when the generator is running on default guidance because no saved
       // guidance exists (defensive: older responses simply omit the field).
       setGuidanceFallback(data.guidance_source === 'default')
+      // Fallback content counts as unsaved so the user can persist the built-in
+      // guidance as-is; otherwise the editor's Save button stays disabled.
+      setSavedGuidance(data.guidance_source === 'default' ? '' : data.guidance)
     } catch {
       setGuidanceError('Email guidance could not be loaded. Refresh and try again.')
     }
@@ -145,6 +148,9 @@ export default function TemplatesPage() {
       if (!res.ok || !data.success) throw new Error('Guidance update failed')
       setSavedGuidance(guidance.trim())
       setGuidance(guidance.trim())
+      // The PUT created stored guidance, so the editor is no longer running on the
+      // built-in default.
+      setGuidanceFallback(false)
     } catch {
       setGuidanceError('Email guidance could not be saved. Your changes remain in this editor.')
     } finally {
