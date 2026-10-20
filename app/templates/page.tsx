@@ -51,6 +51,7 @@ export default function TemplatesPage() {
   const [savedGuidance, setSavedGuidance] = useState('')
   const [savingGuidance, setSavingGuidance] = useState(false)
   const [guidanceError, setGuidanceError] = useState('')
+  const [guidanceFallback, setGuidanceFallback] = useState(false)
   const [signature, setSignature] = useState('')
   const [savedSignature, setSavedSignature] = useState('')
   const [signatureLoaded, setSignatureLoaded] = useState(false)
@@ -84,6 +85,12 @@ export default function TemplatesPage() {
       if (!res.ok || !data.success) throw new Error('Guidance unavailable')
       setGuidance(data.guidance)
       setSavedGuidance(data.guidance)
+      // Disclose when the generator is running on default guidance because no saved
+      // guidance exists (defensive: older responses simply omit the field).
+      setGuidanceFallback(data.guidance_source === 'default')
+      // Fallback content counts as unsaved so the user can persist the built-in
+      // guidance as-is; otherwise the editor's Save button stays disabled.
+      setSavedGuidance(data.guidance_source === 'default' ? '' : data.guidance)
     } catch {
       setGuidanceError('Email guidance could not be loaded. Refresh and try again.')
     }
@@ -141,6 +148,9 @@ export default function TemplatesPage() {
       if (!res.ok || !data.success) throw new Error('Guidance update failed')
       setSavedGuidance(guidance.trim())
       setGuidance(guidance.trim())
+      // The PUT created stored guidance, so the editor is no longer running on the
+      // built-in default.
+      setGuidanceFallback(false)
     } catch {
       setGuidanceError('Email guidance could not be saved. Your changes remain in this editor.')
     } finally {
@@ -250,6 +260,11 @@ export default function TemplatesPage() {
           className="textarea"
           aria-label="Email generator guidance"
         />
+        {guidanceFallback && !guidanceError && (
+          <div style={{ color: 'var(--orange-400)', fontSize: 12, marginTop: 8 }}>
+            No saved guidance is available yet — the generator is using built-in default guidance. Save this editor's content to replace it.
+          </div>
+        )}
         {guidanceError && <div style={{ color: 'var(--red-400)', fontSize: 12, marginTop: 8 }}>{guidanceError}</div>}
       </div>
 

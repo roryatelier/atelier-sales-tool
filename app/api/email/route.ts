@@ -7,6 +7,14 @@ import { NextRequest, NextResponse } from 'next/server'
 
 const SIGNATURE_RULE = 'Do not write a signature block and do not invent a job title, phone number, email address, or website. A saved signature is appended after generation and is not part of this task.'
 
+// Lowest-precedence, draft-only instruction. It never overrides the safety rules
+// (signal rule, signature rule) or the requirement to use only verified facts;
+// those are stated in the block label so the model treats this as a preference,
+// not a permission.
+const DRAFT_INSTRUCTION_MAX_LENGTH = 1000
+const draftInstructionBlock = (instruction: string): string =>
+  'PER-DRAFT INSTRUCTION — follow this for this email only, unless it conflicts with the SIGNAL RULE, the SIGNATURE RULE, or the requirement to use only verified facts above. It must not change global guidance.\n"' + instruction.replace(/\r/g, '') + '"\n\n'
+
 const MESSAGE_MATRIX: Record<string, { focus: string; proofPoints: string }> = {
   General: {
     focus: 'Growth, innovation capacity, and bringing products to market efficiently',
@@ -54,7 +62,7 @@ const MESSAGE_MATRIX: Record<string, { focus: string; proofPoints: string }> = {
   }
 }
 
-function buildEmailPrompt(dossier: Record<string, unknown>, role: string, canonicalRole: string, contactName: string, guidance: string, template?: { subject: string; body: string }, pitchBullet?: string, followUp?: { original_subject?: string; contact_name?: string; date_sent?: string }, senderName?: string): string {
+function buildEmailPrompt(dossier: Record<string, unknown>, role: string, canonicalRole: string, contactName: string, guidance: string, template?: { subject: string; body: string }, pitchBullet?: string, followUp?: { original_subject?: string; contact_name?: string; date_sent?: string }, senderName?: string, draftInstruction?: string): string {
   const matrix = MESSAGE_MATRIX[canonicalRole] ?? MESSAGE_MATRIX.General
   const retailers = (dossier.retailers as { name: string }[])?.map(r => r.name).join(', ') ?? 'Unknown'
   const verifiedSignals = (dossier.signals as { type: string; description: string }[] | undefined)?.slice(0, 3) ?? []
@@ -94,6 +102,7 @@ function buildEmailPrompt(dossier: Record<string, unknown>, role: string, canoni
       'Rewrite the template above for this specific brand and contact. Keep the same tone, structure, and length as the template — do not add or remove paragraphs, do not change the style. Replace generic placeholders only with verified facts supplied above. Address the recipient by first name. End with a soft CTA asking for a call. You MUST mention the brand name ' + dossier.brand_name + ' at least once in the email body.\n' +
       (senderName ? 'Sign off with "Thanks," or "Best," followed by the sender\'s name: ' + senderName + '. Do not include a position or title.' : 'Sign off with just "Thanks," with no name.') + '\n' +
       'SIGNATURE RULE\n' + SIGNATURE_RULE + '\n\n' +
+      (draftInstruction ? draftInstructionBlock(draftInstruction) : '') +
       'OUTPUT FORMAT\n' +
       'Return valid JSON only. No preamble, no markdown fences. Begin with { and end with }.\n' +
       '{ "subject": "string", "body": "string" }'
@@ -130,6 +139,7 @@ function buildEmailPrompt(dossier: Record<string, unknown>, role: string, canoni
     'TONE: Conversational but professional. Write like a human, not a press release. No bullet points. No jargon.\n' +
     'SUBJECT LINE: Specific and curiosity-driven. Reference the brand or a signal. Under 8 words.\n' +
     'REQUIREMENT: You MUST mention the brand name ' + dossier.brand_name + ' at least once in the email body.\n\n' +
+    (draftInstruction ? draftInstructionBlock(draftInstruction) : '') +
     'OUTPUT FORMAT\n' +
     'Return valid JSON only. No preamble, no markdown fences. Begin with { and end with }.\n' +
     '{ "subject": "string", "body": "string" }'
@@ -188,7 +198,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ success: true, pitch_angle: pitch })
     }
 
-    const { dossier, role, contact_name, template, pitch_bullet, follow_up, sender_name } = body
+    const { dossier, role, contact_name, template, pitch_bullet, follow_up, sender_name, draft_instruction } = body
 
     if (!dossier || !role || !contact_name) {
       return NextResponse.json(
@@ -197,20 +207,44 @@ export async function POST(request: NextRequest) {
       )
     }
 
+    // Per-draft instruction: optional, draft-scoped, lowest precedence. Empty or
+    // whitespace-only values are treated as absent; oversized values are rejected
+    // rather than silently truncated.
+    let draftInstruction: string | undefined = undefined
+    if (draft_instruction !== undefined && draft_instruction !== null) {
+      if (typeof draft_instruction !== 'string') {
+        return NextResponse.json({ error: 'draft_instruction must be a string' }, { status: 400 })
+      }
+      const cleaned = draft_instruction.trim()
+      if (cleaned.length > DRAFT_INSTRUCTION_MAX_LENGTH) {
+        return NextResponse.json({ error: `draft_instruction must be at most ${DRAFT_INSTRUCTION_MAX_LENGTH} characters` }, { status: 400 })
+      }
+      draftInstruction = cleaned || undefined
+    }
+
+    // Guidance provenance: the route-level default (this initialisation) is what the
+    // response reports if the content lookup below throws, so a lib failure can never
+    // pass stored guidance off or leave the disclosure unset.
     let canonicalRole = canonicaliseEmailRole(role)
     let guidance = DEFAULT_EMAIL_GUIDANCE
+    let guidanceSource: 'stored' | 'default' = 'default'
+    let guidanceRevision = 'default'
     let recoveredTemplate: EmailTemplateContent | null = null
     try {
       const recovered = await getDraftEmailContent(role, Boolean(follow_up))
       canonicalRole = recovered.canonicalRole
       guidance = recovered.guidance
+      guidanceSource = recovered.guidanceSource
+      guidanceRevision = recovered.guidanceRevision
       recoveredTemplate = recovered.template
     } catch (error) {
       logSafeError('Email content lookup error:', error)
+      guidanceSource = 'default'
+      guidanceRevision = 'default'
     }
 
     const selectedTemplate = template ?? recoveredTemplate ?? undefined
-    const prompt = buildEmailPrompt(dossier, role, canonicalRole, contact_name, guidance, selectedTemplate, pitch_bullet, follow_up, sender_name || undefined)
+    const prompt = buildEmailPrompt(dossier, role, canonicalRole, contact_name, guidance, selectedTemplate, pitch_bullet, follow_up, sender_name || undefined, draftInstruction)
 
     let result = await generateOnce(prompt, dossier)
     let totalInputTokens = result.usage.inputTokens
@@ -243,6 +277,8 @@ export async function POST(request: NextRequest) {
       success: true,
       email: result.email,
       role_group: canonicalRole,
+      guidance_source: guidanceSource,
+      guidance_revision: guidanceRevision,
       template_used: template
         ? (typeof template.name === 'string' && template.name.trim() ? template.name.trim() : 'Manual selection')
         : recoveredTemplate?.name ?? null
