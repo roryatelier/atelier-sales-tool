@@ -227,7 +227,7 @@ export async function POST(request: NextRequest) {
     // pass stored guidance off or leave the disclosure unset.
     let canonicalRole = canonicaliseEmailRole(role)
     let guidance = DEFAULT_EMAIL_GUIDANCE
-    let guidanceSource: 'stored' | 'default' = 'default'
+    let guidanceSource: 'stored' | 'default' | 'unknown' = 'default'
     let guidanceRevision = 'default'
     let recoveredTemplate: EmailTemplateContent | null = null
     try {

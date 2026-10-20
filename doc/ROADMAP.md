@@ -11,6 +11,33 @@ Status meanings:
 
 `SECURITY_CONTAINMENT.md` describes the containment patch and is stale about the scheduler. `doc/TECHNICAL_HANDOFF.md` and `doc/PROMPTS.md` still describe an older framework version and the retired model. Prefer this file, `AGENTS.md`, and the code.
 
+## Review update — 20 October 2026
+
+Checked against `c2a0f66` (PR #11). The sections below were originally reconciled
+before PRs #8–#11; this update takes precedence where they differ.
+
+- **Done, #8:** draft generation displays the selected template and role group.
+- **Done, #10:** each sender can save a signature. The composer previews it and
+  immediate and scheduled sending use the shared HTML/MIME builder. This closes
+  the shared-builder gap listed under Scheduled sending below.
+- **Done, #11:** per-draft instructions are retained per browser tab and sent to
+  generation. Guidance source and revision are displayed. Prompt precedence is a
+  model instruction, not a runtime guarantee.
+- **Fix prepared, awaiting schema review:** distinguish seeded default guidance,
+  explicitly saved guidance, and legacy guidance whose origin was not recorded.
+  Preserve all legacy content. Integration coverage reproduces initial seeding,
+  migration and explicit saves against a temporary SQLite database. PostgreSQL
+  migration still needs deployment verification after review.
+- **Release label:** `v0.2.2` labels the already-deployed signatures and generation
+  controls at `c2a0f66`, including the known provenance limitation in its notes.
+- **Verified release evidence:** PR #11's GitHub `verify` check and Vercel production
+  deployment succeeded. Its second Codex review raised a remaining P2 provenance
+  finding; the review was not clean. Green CI did not close that finding.
+- **Still partial:** durable immediate/scheduled send states and idempotency;
+  server-owned frozen draft revisions; dependable Sheets sync and visible failures.
+- **Still open:** accepted-send ledger/outbox, Copper pilot, and automated release
+  probes. Existing mocked tests do not prove live Gmail delivery or Lusha coverage.
+
 ## Priority
 
 1. **Durable sending gaps** while the scheduler is live (partial work below). Ambiguous Gmail outcomes must stay visible and must not send twice.

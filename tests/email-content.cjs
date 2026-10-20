@@ -116,7 +116,7 @@ function at(value) { return JSON.stringify(value) }
 
 test('guidance provenance distinguishes stored guidance from the default fallback', () => {
   assert.equal(
-    at(content.guidanceProvenance({ content: 'Stored guidance text', updated_at: '2026-10-19 05:36:00' })),
+    at(content.guidanceProvenance({ content: 'Stored guidance text', source: 'user', updated_at: '2026-10-19 05:36:00' })),
     at({ source: 'stored', revision: '2026-10-19 05:36:00' })
   )
   assert.equal(at(content.guidanceProvenance(undefined)), at({ source: 'default', revision: 'default' }))
@@ -127,7 +127,7 @@ test('guidance provenance distinguishes stored guidance from the default fallbac
   )
   // A stored row whose timestamp is missing still reports stored, with an honest revision.
   assert.equal(
-    at(content.guidanceProvenance({ content: 'Stored guidance text' })),
+    at(content.guidanceProvenance({ content: 'Stored guidance text', source: 'user' })),
     at({ source: 'stored', revision: 'unknown' })
   )
 })
@@ -219,7 +219,7 @@ test('review fixes: contact-tab instruction leak, snapshot persistence, fallback
   assert.match(templatesPage, /setGuidanceFallback\(false\)/, 'a successful save must clear the fallback notice')
   // 4. When the editor loads default guidance, it must be saveable unchanged
   // (fallback content counts as unsaved).
-  assert.match(templatesPage, /setSavedGuidance\(data\.guidance_source === 'default' \? '' : data\.guidance\)/, 'fallback guidance must not be treated as already-saved')
+  assert.match(templatesPage, /setSavedGuidance\(data\.guidance_source === 'default' \|\| data\.guidance_source === 'unknown' \? '' : data\.guidance\)/, 'fallback guidance must not be treated as already-saved')
 })
 
 test('template recovery is a one-time migration so user edits and deletions persist', () => {
@@ -233,3 +233,62 @@ test('template recovery is a one-time migration so user edits and deletions pers
   assert.doesNotMatch(source, /COUNT\(\*\).*templates/is)
 })
 
+
+
+test('database guidance provenance survives seeding, explicit saves and legacy migration', async () => {
+  const os = require('node:os')
+  const Database = require('better-sqlite3')
+  for (const legacy of [null, content.DEFAULT_EMAIL_GUIDANCE, 'Legacy custom fixture guidance']) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'atelier-guidance-'))
+    try {
+      if (legacy) {
+        const db = new Database(path.join(dir, 'atelier.db'))
+        db.exec("CREATE TABLE email_guidance (id INTEGER PRIMARY KEY, content TEXT NOT NULL, updated_at TEXT DEFAULT (datetime('now')))")
+        db.prepare('INSERT INTO email_guidance (id, content) VALUES (1, ?)').run(legacy)
+        db.close()
+      }
+      const store = loadTypeScript('../lib/email-content.ts', { process: { env: {}, cwd: () => dir } })
+      const initial = await store.getEmailGuidanceInfo()
+      assert.equal(initial.guidanceSource, legacy ? 'unknown' : 'default')
+      assert.equal(initial.content, legacy || content.DEFAULT_EMAIL_GUIDANCE)
+      assert.equal((await store.getDraftEmailContent('CFO', false)).guidanceSource, initial.guidanceSource)
+      // Saving the exact default text explicitly must count as a user save.
+      await store.updateEmailGuidance(content.DEFAULT_EMAIL_GUIDANCE)
+      assert.equal((await store.getEmailGuidanceInfo()).guidanceSource, 'stored')
+      assert.equal((await store.getDraftEmailContent('CFO', false)).guidanceSource, 'stored')
+      await store.updateEmailGuidance('Custom fixture guidance')
+      await store.ensureRecoveredEmailContent()
+      assert.equal((await store.getEmailGuidanceInfo()).content, 'Custom fixture guidance')
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  }
+})
+
+
+test('legacy origin stays unknown through draft provenance transport', () => {
+  const draft = provenance.generatedDraftProvenance({ requestedRole: 'CFO', apiGuidanceSource: 'unknown', apiGuidanceRevision: 'legacy-revision' })
+  assert.equal(draft.guidanceSource, 'unknown')
+  assert.equal(content.guidanceProvenance({ content: 'Legacy custom fixture guidance' }).source, 'unknown')
+})
+
+
+test('rollback-era guidance edits override an obsolete default marker', async () => {
+  const os = require('node:os')
+  const Database = require('better-sqlite3')
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'atelier-guidance-rollback-'))
+  try {
+    const store = loadTypeScript('../lib/email-content.ts', { process: { env: {}, cwd: () => dir } })
+    await store.ensureRecoveredEmailContent()
+    const db = new Database(path.join(dir, 'atelier.db'))
+    db.prepare("UPDATE email_guidance SET content = ?, updated_at = '2026-10-20 00:00:00' WHERE id = 1").run('Guidance saved by the older writer')
+    db.close()
+    const info = await store.getEmailGuidanceInfo()
+    assert.equal(info.content, 'Guidance saved by the older writer')
+    assert.equal(info.guidanceSource, 'unknown')
+    assert.equal(info.guidanceRevision, '2026-10-20 00:00:00')
+    assert.equal((await store.getDraftEmailContent('CFO', false)).guidance, info.content)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})

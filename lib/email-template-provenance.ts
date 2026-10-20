@@ -1,5 +1,5 @@
 export type DraftProvenanceKind = 'manual-template' | 'automatic-template' | 'no-template' | 'fallback'
-export type GuidanceProvenanceSource = 'stored' | 'default'
+export type GuidanceProvenanceSource = 'stored' | 'default' | 'unknown'
 
 export interface DraftProvenance {
   kind: DraftProvenanceKind
@@ -28,7 +28,7 @@ function cleanLabel(value: unknown): string | null {
 }
 
 function cleanGuidanceSource(value: unknown): GuidanceProvenanceSource | null {
-  return value === 'stored' || value === 'default' ? value : null
+  return value === 'stored' || value === 'default' || value === 'unknown' ? value : null
 }
 
 export function generatedDraftProvenance(input: GeneratedDraftProvenanceInput): DraftProvenance {

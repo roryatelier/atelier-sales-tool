@@ -14,6 +14,7 @@ export async function initialiseDb() {
     await sql`ALTER TABLE templates ADD COLUMN IF NOT EXISTS target_role TEXT DEFAULT ''`
     await sql`ALTER TABLE templates ADD COLUMN IF NOT EXISTS source TEXT DEFAULT 'user'`
     await sql`CREATE TABLE IF NOT EXISTS email_guidance (id INTEGER PRIMARY KEY, content TEXT NOT NULL, updated_at TIMESTAMP DEFAULT NOW())`
+    await sql`ALTER TABLE email_guidance ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'unknown'`
     await sql`CREATE TABLE IF NOT EXISTS content_migrations (key TEXT PRIMARY KEY, applied_at TIMESTAMP DEFAULT NOW())`
     await sql`CREATE TABLE IF NOT EXISTS email_signatures (owner_google_sub TEXT PRIMARY KEY, owner_email TEXT NOT NULL DEFAULT '', content TEXT NOT NULL DEFAULT '', updated_at TIMESTAMP DEFAULT NOW())`
     await sql`CREATE TABLE IF NOT EXISTS contact_history (id SERIAL PRIMARY KEY, brand_name TEXT NOT NULL, contact_role TEXT NOT NULL, contact_name TEXT NOT NULL, contact_email TEXT NOT NULL, method TEXT DEFAULT 'email', sent_at TIMESTAMP DEFAULT NOW())`
@@ -56,6 +57,9 @@ export async function initialiseDb() {
       CREATE TABLE IF NOT EXISTS saved_suggestions (id INTEGER PRIMARY KEY AUTOINCREMENT, brand_name TEXT NOT NULL UNIQUE, category TEXT NOT NULL, reason TEXT NOT NULL, signal TEXT NOT NULL, created_at TEXT DEFAULT (datetime('now')));
       CREATE TABLE IF NOT EXISTS scheduled_emails (id INTEGER PRIMARY KEY AUTOINCREMENT, to_email TEXT NOT NULL, cc TEXT, bcc TEXT, subject TEXT NOT NULL, body TEXT NOT NULL, brand_name TEXT, contact_name TEXT, scheduled_at TEXT NOT NULL, sent INTEGER DEFAULT 0, created_at TEXT DEFAULT (datetime('now')), gmail_access_token TEXT, gmail_refresh_token TEXT, timezone TEXT DEFAULT 'Australia/Sydney', sent_by TEXT DEFAULT '', dossier_json TEXT DEFAULT '');
     `)
+    try { db.exec(`ALTER TABLE email_guidance ADD COLUMN source TEXT NOT NULL DEFAULT 'unknown'`) } catch (error) {
+      if (!String(error).includes('duplicate column name')) throw error
+    }
     try { db.exec(`ALTER TABLE templates ADD COLUMN target_role TEXT DEFAULT ''`) } catch {}
     try { db.exec(`ALTER TABLE templates ADD COLUMN source TEXT DEFAULT 'user'`) } catch {}
     try { db.exec(`ALTER TABLE scheduled_emails ADD COLUMN timezone TEXT DEFAULT 'Australia/Sydney'`) } catch {}
