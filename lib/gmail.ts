@@ -1,3 +1,4 @@
+import { google } from 'googleapis'
 import { buildHtmlEmailRaw } from './email-mime'
 
 const REDIRECT_URI = process.env.PRODUCTION_URL
@@ -29,7 +30,6 @@ export async function refreshGmailToken(refreshToken: string): Promise<string | 
 }
 
 export async function sendViaGmail(accessToken: string, raw: string): Promise<string> {
-  const { google } = await import('googleapis')
   const oauth2 = new google.auth.OAuth2(
     process.env.GMAIL_CLIENT_ID,
     process.env.GMAIL_CLIENT_SECRET,

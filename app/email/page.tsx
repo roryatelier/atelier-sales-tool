@@ -10,6 +10,7 @@ import {
   generatedDraftProvenance,
   type DraftProvenance,
 } from '@/lib/email-template-provenance'
+import { confirmedSendDraftKey, createConfirmedSendLedger, type RetainedSend } from '@/lib/send-confirmation'
 
 import React, { useEffect, useLayoutEffect, useState, useRef, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
@@ -93,6 +94,9 @@ interface TabSnapshot {
   pitchRoles: string[]
   recommendedRole: string
   selectedPitchRole: string
+  confirmedRequestId?: string | null
+  confirmedDraftKey?: string | null
+  parkedSends?: { requestId: string; draftKey: string }[]
 }
 
 export default function EmailPage() {
@@ -167,6 +171,9 @@ export default function EmailPage() {
   const pendingContactForTabRef = useRef<Contact | null>(null)
   // Set only from localStorage load — never cleared by tab switching — used as send-time fallback
   const followUpContextRef = useRef<{original_subject?: string; contact_name?: string; date_sent?: string} | null>(null)
+  // One request id per confirmed draft, kept per tab so a retry of an uncertain
+  // send cannot mint a second id. A changed draft claims a new id.
+  const confirmedSendsRef = useRef(createConfirmedSendLedger())
   const bodyTextareaRef = useRef<HTMLTextAreaElement>(null)
   const pendingSelectionRef = useRef<[number, number] | null>(null)
   const linkInputRef = useRef<HTMLInputElement>(null)
@@ -193,12 +200,22 @@ export default function EmailPage() {
     return brand
   }
 
+  function retainedSnapshot(id: string): Pick<TabSnapshot, 'confirmedRequestId' | 'confirmedDraftKey' | 'parkedSends'> {
+    const retained = confirmedSendsRef.current.current(id)
+    return {
+      confirmedRequestId: retained?.requestId ?? null,
+      confirmedDraftKey: retained?.draftKey ?? null,
+      parkedSends: confirmedSendsRef.current.parked(id),
+    }
+  }
+
   function saveCurrentTab(): void {
     tabDataRef.current.set(activeTabIdRef.current, {
       id: activeTabIdRef.current, dossier, contact, selectedRole, email, loading, warning, error,
       trustGatePassed, sent, needsAuth, toEmail, ccEmail, bccEmail, showCc, showBcc,
       activeTemplate, draftProvenance, draftInstruction, followUpContext, selectedBullet, outreachTiming,
-      pitchAngles, pitchRoles, recommendedRole, selectedPitchRole
+      pitchAngles, pitchRoles, recommendedRole, selectedPitchRole,
+      ...retainedSnapshot(activeTabIdRef.current),
     })
   }
 
@@ -304,6 +321,7 @@ export default function EmailPage() {
       }
     }
     tabDataRef.current.delete(id)
+    confirmedSendsRef.current.forget(id)
     setTabIds(prev => prev.filter(tid => tid !== id))
   }
 
@@ -354,7 +372,13 @@ export default function EmailPage() {
             draftProvenance: t.draftProvenance ?? null,
             draftInstruction: t.draftInstruction ?? '',
           }))
-          tabs.forEach(t => tabDataRef.current.set(t.id, t))
+          tabs.forEach(t => {
+            tabDataRef.current.set(t.id, t)
+            const restored: RetainedSend | null = t.confirmedRequestId && t.confirmedDraftKey
+              ? { requestId: t.confirmedRequestId, draftKey: t.confirmedDraftKey }
+              : null
+            confirmedSendsRef.current.restore(t.id, restored, t.parkedSends ?? [])
+          })
           setTabIds(tabs.map(t => t.id))
           tabCounterRef.current = Math.max(0, ...tabs.map(t => {
             const n = parseInt((t.id || '').split('-')[1] || '0')
@@ -480,6 +504,7 @@ export default function EmailPage() {
       toEmail, ccEmail, bccEmail, showCc, showBcc,
       activeTemplate, draftProvenance, draftInstruction, followUpContext, selectedBullet, outreachTiming,
       pitchAngles, pitchRoles, recommendedRole, selectedPitchRole,
+      ...retainedSnapshot(activeTabIdRef.current),
     })
     const allSnaps = tabIds
       .map(id => tabDataRef.current.get(id))
@@ -930,12 +955,25 @@ export default function EmailPage() {
     e.target.value = ''
   }
 
+  function draftKeyForActiveTab(): string {
+    return confirmedSendDraftKey({
+      to: toEmail,
+      cc: ccEmail,
+      bcc: bccEmail,
+      subject: email?.subject ?? '',
+      emailBody: outboundBody(),
+      attachments,
+    })
+  }
+
   async function handleSend() {
     if (!email) return
     if (!matchesDraftIdentity(userGoogleSub, userGoogleSub)) {
       setError('Account changed. Reload before sending this draft.')
       return
     }
+    const tabId = activeTabIdRef.current
+    const requestId = confirmedSendsRef.current.claim(tabId, draftKeyForActiveTab())
     setSending(true)
     setError('')
 
@@ -955,11 +993,28 @@ export default function EmailPage() {
           leadSource: userStorage.getItem('lead_source') ?? 'Outbound',
           senderName: userStorage.getItem('atelier_user_name') ?? '',
           dossier,
-          attachments: attachments.length > 0 ? attachments : undefined
+          attachments: attachments.length > 0 ? attachments : undefined,
+          request_id: requestId,
         })
       })
 
-      const data = await res.json()
+      let data: { reauth?: boolean; success?: boolean; error?: unknown; uncertain?: boolean; outcome?: string; pipeline_synced?: boolean | null } = {}
+      try {
+        data = await res.json()
+      } catch {
+        // The response never arrived in a readable form. Keep the request id.
+        setError('Something went wrong. Please try again.')
+        setShowModal(false)
+        return
+      }
+
+      confirmedSendsRef.current.observe(tabId, {
+        kind: 'response',
+        httpStatus: res.status,
+        success: data.success === true,
+        uncertain: data.uncertain === true,
+        outcome: typeof data.outcome === 'string' ? data.outcome : undefined,
+      })
 
       if (data.reauth) { setNeedsAuth(true); setShowModal(false); return }
       if (!res.ok || !data.success) { setError(typeof data.error === 'string' ? data.error : 'Failed to send email. Please try again.'); setShowModal(false); return }

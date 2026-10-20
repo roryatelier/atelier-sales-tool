@@ -68,7 +68,19 @@ test('save a signature, generate, regenerate, and preview the same signature on 
     const scheduled = []
     await page.route('**/api/send-email', async route => {
       sent.push(route.request().postDataJSON())
-      await route.fulfill({ json: { success: true, message_id: 'fixture-message', pipeline_synced: true } })
+      if (sent.length === 1) {
+        await route.fulfill({
+          status: 409,
+          contentType: 'application/json',
+          body: JSON.stringify({ success: false, outcome: 'uncertain', uncertain: true, error: 'This send is in progress or its outcome was not confirmed. Check Sent mail before retrying.' }),
+        })
+        return
+      }
+      if (sent.length === 2) {
+        await route.abort('failed')
+        return
+      }
+      await route.fulfill({ json: { success: true, outcome: 'accepted', message_id: 'fixture-message', pipeline_synced: true } })
     })
     await page.route('**/api/schedule-email', async route => {
       scheduled.push(route.request().postDataJSON())
@@ -170,10 +182,25 @@ test('save a signature, generate, regenerate, and preview the same signature on 
     await page.getByRole('tab', { name: /Fixture Brand · Fixture/ }).click()
     await page.getByRole('button', { name: 'Send email' }).click()
     await page.locator('.modal-foot').getByRole('button', { name: 'Confirm send' }).click()
+    await page.getByText('This send is in progress or its outcome was not confirmed. Check Sent mail before retrying.').waitFor()
+    await page.getByRole('button', { name: 'Send email' }).click()
+    await page.locator('.modal-foot').getByRole('button', { name: 'Confirm send' }).click()
+    await page.getByText('Something went wrong. Please try again.').waitFor()
+    await page.locator('input.input').first().fill('Changed fixture subject')
+    await page.getByRole('button', { name: 'Send email' }).click()
+    await page.locator('.modal-foot').getByRole('button', { name: 'Confirm send' }).click()
     await page.getByText('Email sent successfully').waitFor()
-    assert.equal(sent.length, 1)
-    assert.equal(occurrences(sent[0].emailBody, SIGNATURE), 1)
-    assert.match(sent[0].emailBody, new RegExp(`Draft ${currentDraft}`))
+    assert.equal(sent.length, 3)
+    const requestId = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+    assert.match(sent[0].request_id, requestId)
+    assert.equal(sent[1].request_id, sent[0].request_id)
+    assert.match(sent[2].request_id, requestId)
+    assert.notEqual(sent[2].request_id, sent[0].request_id)
+    assert.equal(sent[2].subject, 'Changed fixture subject')
+    for (const payload of sent) {
+      assert.equal(occurrences(payload.emailBody, SIGNATURE), 1)
+      assert.match(payload.emailBody, new RegExp(`Draft ${currentDraft}`))
+    }
     assert.deepEqual(errors, [])
   } finally {
     if (browser) await browser.close()

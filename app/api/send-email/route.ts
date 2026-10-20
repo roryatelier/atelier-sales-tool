@@ -3,14 +3,9 @@ import { sealGmailCredentials } from '@/lib/auth-policy'
 import { appendPipelineRow } from '@/lib/sheets'
 import { authorizeRequest } from '@/lib/api-auth'
 import { NextRequest, NextResponse } from 'next/server'
-import { google } from 'googleapis'
-import { classifyGmailError } from '@/lib/gmail'
+import { classifyGmailError, sendViaGmail, type GmailErrorKind } from '@/lib/gmail'
 import { buildHtmlEmailRaw } from '@/lib/email-mime'
 import { logSafeError } from '@/lib/safe-log'
-
-const REDIRECT_URI = process.env.PRODUCTION_URL
-  ? `${process.env.PRODUCTION_URL}/api/auth/callback`
-  : 'http://localhost:3000/api/auth/callback'
 
 // Immediate sends are keyed by a request id the composer mints when the user
 // confirms one specific message. It is treated as opaque; the payload hash is
@@ -18,14 +13,10 @@ const REDIRECT_URI = process.env.PRODUCTION_URL
 const REQUEST_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const UNCERTAIN_MESSAGE = 'Gmail did not confirm this send. Check Sent mail before trying again.'
 const IN_PROGRESS_MESSAGE = 'This send is in progress or its outcome was not confirmed. Check Sent mail before retrying.'
-
-function getOAuthClient() {
-  return new google.auth.OAuth2(
-    process.env.GMAIL_CLIENT_ID,
-    process.env.GMAIL_CLIENT_SECRET,
-    REDIRECT_URI
-  )
-}
+const QUOTA_MESSAGE = 'Gmail has temporarily limited sending. Please try again later.'
+const POLICY_MESSAGE = 'Your Google Workspace administrator has blocked Gmail access for this app.'
+const REAUTH_MESSAGE = 'Gmail access needs to be reconnected before sending.'
+const ACCEPTED_WRITE_BACKOFF_MS = 25
 
 type RefreshResult = { accessToken: string } | { error: 'reauth' | 'temporary' | 'configuration' }
 
@@ -56,35 +47,9 @@ async function refreshAccessToken(refreshToken: string): Promise<RefreshResult> 
 }
 
 function refreshFailure(result: Exclude<RefreshResult, { accessToken: string }>) {
-  if (result.error === 'reauth') return NextResponse.json({ error: 'Gmail session expired — reconnect Gmail', reauth: true }, { status: 401 })
+  if (result.error === 'reauth') return NextResponse.json({ error: 'Gmail session expired — reconnect Gmail', reauth: true, outcome: 'failed_auth' }, { status: 401 })
   if (result.error === 'configuration') return NextResponse.json({ error: 'Gmail is not configured correctly. Contact an administrator.' }, { status: 503 })
   return NextResponse.json({ error: 'Gmail is temporarily unavailable. Please try again later.' }, { status: 503 })
-}
-
-function sendFailure(error: unknown, outcome?: SendOutcome) {
-  const kind = classifyGmailError(error)
-  logSafeError('Gmail send failed', error)
-  if (kind === 'auth' || kind === 'permission') {
-    return NextResponse.json({ error: 'Gmail access needs to be reconnected before sending.', reauth: true, outcome: outcome ?? 'failed_auth' }, { status: 401 })
-  }
-  if (kind === 'policy') return NextResponse.json({ error: 'Your Google Workspace administrator has blocked Gmail access for this app.', outcome: outcome ?? 'failed' }, { status: 403 })
-  if (kind === 'quota') return NextResponse.json({ error: 'Gmail has temporarily limited sending. Please try again later.', outcome: outcome ?? 'failed' }, { status: 429 })
-  if (kind === 'temporary') return NextResponse.json({ error: UNCERTAIN_MESSAGE, outcome: outcome ?? 'needs_review', uncertain: true }, { status: 503 })
-  return NextResponse.json({ error: UNCERTAIN_MESSAGE, outcome: outcome ?? 'needs_review', uncertain: true }, { status: 502 })
-}
-
-async function gmailSend(accessToken: string, raw: string): Promise<string> {
-  const oauth2Client = getOAuthClient()
-  oauth2Client.setCredentials({ access_token: accessToken })
-  const gmail = google.gmail({ version: 'v1', auth: oauth2Client })
-  const result = await gmail.users.messages.send({ userId: 'me', requestBody: { raw } })
-  const messageId = result.data.id
-  if (typeof messageId !== 'string' || !messageId) {
-    // A send without a message id can never be recorded as accepted; the caller
-    // treats this as an uncertain outcome that needs review, never a resend.
-    throw Object.assign(new Error('Gmail did not return a message id (missing_message_id)'), { code: 'missing_message_id' })
-  }
-  return messageId
 }
 
 interface SendRecord {
@@ -95,6 +60,31 @@ interface SendRecord {
 }
 
 type SendOutcome = 'accepted' | 'failed_auth' | 'failed' | 'needs_review'
+
+// One classification for the first Gmail attempt and the post-refresh retry.
+// quota and policy are definite non-deliveries. auth and permission are definite
+// rejections. Everything else, including a missing message id, a 5xx, a network
+// error, a bare 400, and a 403 whose reason we do not recognise, stays
+// needs_review: those responses do not prove the message was refused, so they
+// must not become a status the user can retry as a new send.
+function outcomeFor(kind: GmailErrorKind): SendOutcome {
+  if (kind === 'auth' || kind === 'permission') return 'failed_auth'
+  if (kind === 'quota' || kind === 'policy') return 'failed'
+  return 'needs_review'
+}
+
+function sendFailure(error: unknown, outcome?: SendOutcome) {
+  const kind = classifyGmailError(error)
+  logSafeError('Gmail send failed', error)
+  const recorded = outcome ?? outcomeFor(kind)
+  if (kind === 'auth' || kind === 'permission') {
+    return NextResponse.json({ error: REAUTH_MESSAGE, reauth: true, outcome: recorded }, { status: 401 })
+  }
+  if (kind === 'policy') return NextResponse.json({ error: POLICY_MESSAGE, outcome: recorded }, { status: 403 })
+  if (kind === 'quota') return NextResponse.json({ error: QUOTA_MESSAGE, outcome: recorded }, { status: 429 })
+  if (kind === 'temporary') return NextResponse.json({ error: UNCERTAIN_MESSAGE, outcome: recorded, uncertain: true }, { status: 503 })
+  return NextResponse.json({ error: UNCERTAIN_MESSAGE, outcome: recorded, uncertain: true }, { status: 502 })
+}
 
 async function sha256Hex(value: string): Promise<string> {
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value))
@@ -107,14 +97,16 @@ function isUniqueViolation(error: unknown): boolean {
     /UNIQUE constraint failed: send_records/.test(String((error as { message?: string } | null)?.message ?? ''))
 }
 
+function hasMessageId(record: SendRecord): boolean {
+  return typeof record.gmail_message_id === 'string' && record.gmail_message_id.length > 0
+}
+
 // Map a persisted record to the response the composer expects. A replay never
-// triggers a new send; each status tells the user exactly what happened.
+// triggers a new send. Definite failures keep their original status, and a row
+// that already has a Gmail message id is reported as sent.
 function recordResponse(record: SendRecord, replayed: boolean): NextResponse {
-  const outcome: SendOutcome | 'uncertain' = record.status === 'accepted' ? 'accepted'
-    : record.status === 'sending' || record.status === 'needs_review' ? (record.status === 'sending' ? 'uncertain' : 'needs_review')
-    : record.status === 'failed_auth' ? 'failed_auth'
-    : 'failed'
-  if (outcome === 'accepted') {
+  if (record.status === 'accepted' || hasMessageId(record)) {
+    const outcome = record.status === 'accepted' ? 'accepted' : 'needs_review'
     return NextResponse.json({
       success: true,
       outcome,
@@ -122,21 +114,39 @@ function recordResponse(record: SendRecord, replayed: boolean): NextResponse {
       replayed,
     })
   }
-  if (outcome === 'failed_auth') {
-    return NextResponse.json({ error: 'Gmail access needs to be reconnected before sending.', reauth: true, outcome, replayed }, { status: 401 })
+  switch (record.status) {
+    case 'failed_auth':
+      return NextResponse.json({ error: REAUTH_MESSAGE, reauth: true, outcome: 'failed_auth', replayed }, { status: 401 })
+    case 'failed':
+      if (record.last_error_code === 'quota') {
+        return NextResponse.json({ error: QUOTA_MESSAGE, outcome: 'failed', replayed }, { status: 429 })
+      }
+      if (record.last_error_code === 'policy') {
+        return NextResponse.json({ error: POLICY_MESSAGE, outcome: 'failed', replayed }, { status: 403 })
+      }
+      return NextResponse.json({ success: false, outcome: 'needs_review', uncertain: true, error: UNCERTAIN_MESSAGE, replayed }, { status: 502 })
+    case 'needs_review':
+      return NextResponse.json({ success: false, outcome: 'needs_review', uncertain: true, error: UNCERTAIN_MESSAGE, replayed }, { status: 502 })
+    case 'sending':
+    case 'recorded':
+    default:
+      return NextResponse.json({ success: false, outcome: 'uncertain', uncertain: true, error: IN_PROGRESS_MESSAGE, replayed }, { status: 409 })
   }
-  if (outcome === 'uncertain') {
-    return NextResponse.json({ success: false, outcome, uncertain: true, error: IN_PROGRESS_MESSAGE, replayed }, { status: 409 })
-  }
-  // needs_review / failed: the recorded uncertainty or failure replays verbatim.
-  return NextResponse.json({ success: false, outcome, replayed, error: UNCERTAIN_MESSAGE }, { status: 502 })
 }
+
+type ClaimFollowUp =
+  | { action: 'respond'; response: NextResponse }
+  | { action: 'send'; recordId: number }
 
 export async function POST(request: NextRequest) {
   const auth = await authorizeRequest(request)
   if (auth.error) return auth.error
   const session = auth.session
 
+  let gmailAttempted = false
+  // Set only after Gmail returns a message id, so an unexpected failure later
+  // can still name that id instead of looking like a send that never happened.
+  let acceptedMessageId: string | null = null
   try {
     const body = await request.json()
     if (body.expectedGoogleSub !== session.googleSub) {
@@ -194,28 +204,132 @@ export async function POST(request: NextRequest) {
     }))
 
     const { isVercel, initialiseDb, getLocalDb } = await import('@/lib/db')
-    await initialiseDb()
+    try {
+      await initialiseDb()
+    } catch (error) {
+      logSafeError('Send record schema initialisation failed', error)
+      return NextResponse.json({ error: 'Could not start this send. Try again in a moment.' }, { status: 503 })
+    }
 
-    async function loadRecord(): Promise<SendRecord | null> {
+    async function loadRecordById(id: number): Promise<SendRecord | null> {
       if (isVercel) {
         const { sql } = await import('@vercel/postgres')
         const result = await sql`
           SELECT id, status, gmail_message_id, last_error_code FROM send_records
-          WHERE owner_google_sub = ${session.googleSub} AND request_id = ${requestId}`
+          WHERE id = ${id} AND owner_google_sub = ${session.googleSub}`
         return (result.rows[0] as unknown as SendRecord | undefined) ?? null
       }
       const db = getLocalDb()
       try {
-        return (db.prepare('SELECT id, status, gmail_message_id, last_error_code FROM send_records WHERE owner_google_sub = ? AND request_id = ?').get(session.googleSub, requestId) as SendRecord | undefined) ?? null
+        return (db.prepare('SELECT id, status, gmail_message_id, last_error_code FROM send_records WHERE id = ? AND owner_google_sub = ?').get(id, session.googleSub) as SendRecord | undefined) ?? null
       } finally {
         db.close()
       }
     }
 
+    async function releaseClaim(id: number): Promise<number> {
+      if (isVercel) {
+        const { sql } = await import('@vercel/postgres')
+        const result = await sql`
+          UPDATE send_records
+          SET status = 'recorded', last_error_code = NULL, last_error = NULL, updated_at = NOW()
+          WHERE id = ${id} AND owner_google_sub = ${session.googleSub} AND status = 'sending'
+          RETURNING id`
+        return result.rowCount ?? result.rows.length
+      }
+      const db = getLocalDb()
+      try {
+        const result = db.prepare(`UPDATE send_records
+          SET status = 'recorded', last_error_code = NULL, last_error = NULL, updated_at = datetime('now')
+          WHERE id = ? AND owner_google_sub = ? AND status = 'sending'`).run(id, session.googleSub)
+        return result.changes
+      } finally {
+        db.close()
+      }
+    }
+
+    async function releaseByRequestId(): Promise<void> {
+      if (isVercel) {
+        const { sql } = await import('@vercel/postgres')
+        await sql`
+          UPDATE send_records
+          SET status = 'recorded', last_error_code = NULL, last_error = NULL, updated_at = NOW()
+          WHERE request_id = ${requestId} AND owner_google_sub = ${session.googleSub} AND status = 'sending'`
+        return
+      }
+      const db = getLocalDb()
+      try {
+        db.prepare(`UPDATE send_records
+          SET status = 'recorded', last_error_code = NULL, last_error = NULL, updated_at = datetime('now')
+          WHERE request_id = ? AND owner_google_sub = ? AND status = 'sending'`).run(requestId, session.googleSub)
+      } finally {
+        db.close()
+      }
+    }
+
+    // Moves a claimed row out of 'sending'. Throws unless exactly one sending
+    // row was updated, so a lost response can be retried instead of treated as
+    // recorded, and a later write cannot overwrite an accepted row.
+    async function finishOutcome(status: SendOutcome, messageId: string | null, errorCode: string | null, id: number): Promise<void> {
+      let updated = 0
+      if (isVercel) {
+        const { sql } = await import('@vercel/postgres')
+        const result = await sql`
+          UPDATE send_records
+          SET status = ${status},
+              gmail_message_id = ${messageId},
+              last_error_code = ${errorCode},
+              last_error = ${errorCode},
+              accepted_at = CASE WHEN ${status} = 'accepted' THEN NOW() ELSE NULL END,
+              updated_at = NOW()
+          WHERE id = ${id} AND owner_google_sub = ${session.googleSub} AND status = 'sending'
+          RETURNING id`
+        updated = result.rowCount ?? result.rows.length
+      } else {
+        const db = getLocalDb()
+        try {
+          const result = db.prepare(`UPDATE send_records
+            SET status = ?, gmail_message_id = ?, last_error_code = ?, last_error = ?,
+                accepted_at = CASE WHEN ? = 'accepted' THEN datetime('now') ELSE NULL END,
+                updated_at = datetime('now')
+            WHERE id = ? AND owner_google_sub = ? AND status = 'sending'`)
+            .run(status, messageId, errorCode, errorCode, status, id, session.googleSub)
+          updated = result.changes
+        } finally {
+          db.close()
+        }
+      }
+      if (updated !== 1) throw new Error('send outcome write did not update the sending row')
+    }
+
+    async function recordTerminal(id: number, status: SendOutcome, errorCode: string, response: NextResponse): Promise<NextResponse> {
+      try {
+        await finishOutcome(status, null, errorCode, id)
+      } catch (error) {
+        logSafeError('Send outcome write failed', error)
+      }
+      return response
+    }
+
+    // Token refresh failed before Gmail accepted anything. A real reauth burns
+    // the id. A temporary or configuration failure releases the claim so the
+    // same confirmation can try again without a second send.
+    async function respondToRefreshFailure(id: number, result: Exclude<RefreshResult, { accessToken: string }>): Promise<NextResponse> {
+      const response = refreshFailure(result)
+      if (result.error === 'reauth') return recordTerminal(id, 'failed_auth', 'token_refresh_reauth', response)
+      try {
+        const released = await releaseClaim(id)
+        if (released !== 1) logSafeError('Send claim release did not update the sending row', new Error('send claim release missed'))
+      } catch (error) {
+        logSafeError('Send claim release failed before Gmail acceptance', error)
+      }
+      return response
+    }
+
     // Durable record first. If this write fails, Gmail is never contacted.
     // The request id is globally unique: a replay from another account can never
     // silently send its own copy to the same recipient.
-    async function replayAfterConflict(): Promise<NextResponse | null> {
+    async function replayAfterConflict(): Promise<ClaimFollowUp> {
       if (isVercel) {
         const { sql } = await import('@vercel/postgres')
         const rows = await sql`
@@ -223,46 +337,64 @@ export async function POST(request: NextRequest) {
           WHERE request_id = ${requestId}`
         const existing = rows.rows[0] as (SendRecord & { payload_hash: string; owner_google_sub: string }) | undefined
         if (!existing || existing.owner_google_sub !== session.googleSub) {
-          return NextResponse.json({ error: 'This request id was already used by another session. Refresh and confirm again as a new send.' }, { status: 409 })
+          return { action: 'respond', response: NextResponse.json({ error: 'This request id was already used by another session. Refresh and confirm again as a new send.' }, { status: 409 }) }
         }
         if (existing.payload_hash !== payloadHash) {
-          return NextResponse.json({ error: 'This request id was already used for a different email. Refresh and confirm again as a new send.' }, { status: 409 })
+          return { action: 'respond', response: NextResponse.json({ error: 'This request id was already used for a different email. Refresh and confirm again as a new send.' }, { status: 409 }) }
         }
-        if (existing.status !== 'recorded') return recordResponse(existing, true)
+        if (existing.status !== 'recorded') return { action: 'respond', response: recordResponse(existing, true) }
         const claim = await sql`
           UPDATE send_records SET status = 'sending', updated_at = NOW()
           WHERE id = ${existing.id} AND owner_google_sub = ${session.googleSub} AND status = 'recorded'
           RETURNING id`
-        if ((claim.rowCount ?? 0) === 0) {
-          const current = await loadRecord()
-          if (current) return recordResponse(current, true)
-          return NextResponse.json({ success: false, outcome: 'uncertain', uncertain: true, error: IN_PROGRESS_MESSAGE }, { status: 409 })
-        }
-        return null
+        if ((claim.rowCount ?? claim.rows.length) === 1) return { action: 'send', recordId: Number(claim.rows[0]?.id ?? existing.id) }
+        const current = await loadRecordById(Number(existing.id))
+        if (current) return { action: 'respond', response: recordResponse(current, true) }
+        return { action: 'respond', response: NextResponse.json({ success: false, outcome: 'uncertain', uncertain: true, error: IN_PROGRESS_MESSAGE }, { status: 409 }) }
       }
       const db = getLocalDb()
       try {
         const existing = db.prepare('SELECT id, status, gmail_message_id, last_error_code, payload_hash, owner_google_sub FROM send_records WHERE request_id = ?').get(requestId) as (SendRecord & { payload_hash: string; owner_google_sub: string }) | undefined
         if (!existing || existing.owner_google_sub !== session.googleSub) {
-          return NextResponse.json({ error: 'This request id was already used by another session. Refresh and confirm again as a new send.' }, { status: 409 })
+          return { action: 'respond', response: NextResponse.json({ error: 'This request id was already used by another session. Refresh and confirm again as a new send.' }, { status: 409 }) }
         }
         if (existing.payload_hash !== payloadHash) {
-          return NextResponse.json({ error: 'This request id was already used for a different email. Refresh and confirm again as a new send.' }, { status: 409 })
+          return { action: 'respond', response: NextResponse.json({ error: 'This request id was already used for a different email. Refresh and confirm again as a new send.' }, { status: 409 }) }
         }
-        if (existing.status !== 'recorded') return recordResponse(existing, true)
+        if (existing.status !== 'recorded') return { action: 'respond', response: recordResponse(existing, true) }
         const claimed = db.prepare(`UPDATE send_records SET status = 'sending', updated_at = datetime('now')
           WHERE id = ? AND owner_google_sub = ? AND status = 'recorded'`).run(existing.id, session.googleSub)
-        if (claimed.changes === 0) {
-          const current = db.prepare('SELECT id, status, gmail_message_id, last_error_code FROM send_records WHERE id = ? AND owner_google_sub = ?').get(existing.id, session.googleSub) as SendRecord | undefined
-          if (current) return recordResponse(current, true)
-          return NextResponse.json({ success: false, outcome: 'uncertain', uncertain: true, error: IN_PROGRESS_MESSAGE }, { status: 409 })
-        }
-        return null
+        if (claimed.changes === 1) return { action: 'send', recordId: Number(existing.id) }
+        const current = db.prepare('SELECT id, status, gmail_message_id, last_error_code FROM send_records WHERE id = ? AND owner_google_sub = ?').get(existing.id, session.googleSub) as SendRecord | undefined
+        if (current) return { action: 'respond', response: recordResponse(current, true) }
+        return { action: 'respond', response: NextResponse.json({ success: false, outcome: 'uncertain', uncertain: true, error: IN_PROGRESS_MESSAGE }, { status: 409 }) }
       } finally {
         db.close()
       }
     }
 
+    async function claimNewRow(insertedId: number): Promise<ClaimFollowUp> {
+      if (isVercel) {
+        const { sql } = await import('@vercel/postgres')
+        const claim = await sql`
+          UPDATE send_records SET status = 'sending', updated_at = NOW()
+          WHERE id = ${insertedId} AND owner_google_sub = ${session.googleSub} AND status = 'recorded'
+          RETURNING id`
+        if ((claim.rowCount ?? claim.rows.length) === 1) return { action: 'send', recordId: Number(claim.rows[0]?.id ?? insertedId) }
+        return replayAfterConflict()
+      }
+      const db = getLocalDb()
+      try {
+        const claimed = db.prepare(`UPDATE send_records SET status = 'sending', updated_at = datetime('now')
+          WHERE id = ? AND owner_google_sub = ? AND status = 'recorded'`).run(insertedId, session.googleSub)
+        if (claimed.changes === 1) return { action: 'send', recordId: insertedId }
+        return await replayAfterConflict()
+      } finally {
+        db.close()
+      }
+    }
+
+    let follow: ClaimFollowUp
     try {
       if (isVercel) {
         const { sql } = await import('@vercel/postgres')
@@ -271,38 +403,18 @@ export async function POST(request: NextRequest) {
           VALUES (${session.googleSub}, ${session.email}, ${requestId}, ${payloadHash}, 'recorded')
           ON CONFLICT (request_id) DO NOTHING
           RETURNING id`
-        if ((inserted.rowCount ?? 0) === 0) {
-          const replay = await replayAfterConflict()
-          if (replay) return replay
-        } else {
-          // Claim the record before Gmail. If another request claimed first, this
-          // one becomes a replay instead of a second send.
-          const claim = await sql`
-            UPDATE send_records SET status = 'sending', updated_at = NOW()
-            WHERE request_id = ${requestId} AND owner_google_sub = ${session.googleSub} AND status = 'recorded'
-            RETURNING id`
-          if ((claim.rowCount ?? 0) === 0) {
-            const replay = await replayAfterConflict()
-            if (replay) return replay
-          }
-        }
+        follow = (inserted.rowCount ?? inserted.rows.length) === 0
+          ? await replayAfterConflict()
+          : await claimNewRow(Number(inserted.rows[0].id))
       } else {
         const db = getLocalDb()
         try {
-          db.prepare(`INSERT INTO send_records (owner_google_sub, owner_email, request_id, payload_hash, status)
+          const inserted = db.prepare(`INSERT INTO send_records (owner_google_sub, owner_email, request_id, payload_hash, status)
             VALUES (?, ?, ?, ?, 'recorded')`).run(session.googleSub, session.email, requestId, payloadHash)
-          // Claim the record before Gmail. If another request claimed first, this
-          // one becomes a replay instead of a second send.
-          const claimed = db.prepare(`UPDATE send_records SET status = 'sending', updated_at = datetime('now')
-            WHERE request_id = ? AND owner_google_sub = ? AND status = 'recorded'`).run(requestId, session.googleSub)
-          if (claimed.changes === 0) {
-            const replay = await replayAfterConflict()
-            if (replay) return replay
-          }
+          follow = await claimNewRow(Number(inserted.lastInsertRowid))
         } catch (insertError) {
           if (!isUniqueViolation(insertError)) throw insertError
-          const replay = await replayAfterConflict()
-          if (replay) return replay
+          follow = await replayAfterConflict()
         } finally {
           db.close()
         }
@@ -313,105 +425,100 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Could not start this send. Try again in a moment.' }, { status: 503 })
     }
 
-    const recordRow = await loadRecord()
-    const recordId = recordRow?.id
-    if (!recordId) {
-      return NextResponse.json({ error: 'Send record unavailable. Refresh and confirm the send again.' }, { status: 503 })
-    }
-
-    async function finishOutcome(status: SendOutcome, messageId: string | null, errorCode: string | null): Promise<void> {
-      if (isVercel) {
-        const { sql } = await import('@vercel/postgres')
-        await sql`UPDATE send_records
-          SET status = ${status},
-              gmail_message_id = ${messageId},
-              last_error_code = ${errorCode},
-              last_error = ${errorCode ?? null},
-              accepted_at = ${status === 'accepted' ? new Date().toISOString() : null},
-              updated_at = NOW()
-          WHERE id = ${recordId} AND owner_google_sub = ${session.googleSub}`
-      } else {
-        const db = getLocalDb()
-        try {
-          db.prepare(`UPDATE send_records
-            SET status = ?, gmail_message_id = ?, last_error_code = ?, last_error = ?,
-                accepted_at = CASE WHEN ? = 'accepted' THEN datetime('now') ELSE NULL END,
-                updated_at = datetime('now')
-            WHERE id = ? AND owner_google_sub = ?`)
-            .run(status, messageId, errorCode, errorCode, status, recordId, session.googleSub)
-        } finally {
-          db.close()
-        }
+    if (follow.action === 'respond') return follow.response
+    const recordId = follow.recordId
+    if (!Number.isInteger(recordId) || recordId <= 0) {
+      try { await releaseByRequestId() } catch (error) {
+        logSafeError('Send claim release failed before Gmail', error)
       }
+      return NextResponse.json({ error: 'Send record unavailable. Refresh and confirm the send again.' }, { status: 503 })
     }
 
     const raw = buildHtmlEmailRaw(to, subject, emailBody, cc, bcc, attachments)
     let newAccessToken: string | null = null
 
-    // If no access token but refresh token exists, refresh before first attempt
+    // If no access token but refresh token exists, refresh before first attempt.
+    // Gmail has not been contacted yet.
     if (!accessToken) {
       const refreshed = await refreshAccessToken(refreshToken!)
-      if ('error' in refreshed) {
-        await finishOutcome('failed_auth', null, 'token_refresh_' + refreshed.error)
-        return refreshFailure(refreshed)
-      }
+      if ('error' in refreshed) return respondToRefreshFailure(recordId, refreshed)
       newAccessToken = refreshed.accessToken
       accessToken = refreshed.accessToken
     }
 
+    async function persistAccepted(id: number, acceptedMessageId: string): Promise<boolean> {
+      const tryOnce = async () => {
+        try {
+          await finishOutcome('accepted', acceptedMessageId, null, id)
+          return true
+        } catch (error) {
+          logSafeError('Send outcome persistence failed after Gmail acceptance', error)
+          return false
+        }
+      }
+      if (await tryOnce()) return true
+      try {
+        await new Promise(resolve => setTimeout(resolve, ACCEPTED_WRITE_BACKOFF_MS))
+      } catch (error) {
+        // A missing timer must not abandon the retry. The row is still 'sending'
+        // and Gmail has already accepted the message.
+        logSafeError('Send outcome retry delay failed after Gmail acceptance', error)
+      }
+      if (await tryOnce()) return true
+      try {
+        const current = await loadRecordById(id)
+        if (current?.status === 'accepted' && hasMessageId(current)) return true
+      } catch (error) {
+        logSafeError('Send record reload failed after Gmail acceptance', error)
+      }
+      try {
+        await finishOutcome('needs_review', acceptedMessageId, 'outcome_write_lost', id)
+      } catch (error) {
+        logSafeError('Send outcome needs_review fallback failed after Gmail acceptance', error)
+      }
+      return false
+    }
+
     let messageId: string
     try {
-      messageId = await gmailSend(accessToken, raw)
+      gmailAttempted = true
+      messageId = await sendViaGmail(accessToken, raw)
+      acceptedMessageId = messageId
     } catch (sendError) {
       if (classifyGmailError(sendError) === 'auth' && refreshToken) {
-        // Token expired mid-session — refresh and retry once
+        // The auth rejection means this attempt was not accepted. Refresh and
+        // retry once. A refresh outage still has not accepted a message.
         const refreshed = await refreshAccessToken(refreshToken)
-        if ('error' in refreshed) {
-          await finishOutcome('failed_auth', null, 'token_refresh_' + refreshed.error)
-          return refreshFailure(refreshed)
-        }
+        if ('error' in refreshed) return respondToRefreshFailure(recordId, refreshed)
         newAccessToken = refreshed.accessToken
         try {
-          messageId = await gmailSend(newAccessToken, raw)
+          messageId = await sendViaGmail(newAccessToken, raw)
+          acceptedMessageId = messageId
         } catch (retryError) {
           const kind = classifyGmailError(retryError)
-          const status: SendOutcome = kind === 'auth' || kind === 'permission' ? 'failed_auth' : 'failed'
-          await finishOutcome(status, null, kind)
-          return sendFailure(retryError, status)
+          const status = outcomeFor(kind)
+          return recordTerminal(recordId, status, kind, sendFailure(retryError, status))
         }
       } else {
         const kind = classifyGmailError(sendError)
-        const status: SendOutcome = kind === 'auth' || kind === 'permission' ? 'failed_auth' : kind === 'quota' || kind === 'policy' ? 'failed' : 'needs_review'
-        await finishOutcome(status, null, kind)
-        return sendFailure(sendError, status)
+        const status = outcomeFor(kind)
+        return recordTerminal(recordId, status, kind, sendFailure(sendError, status))
       }
     }
 
-    // Gmail accepted. The outcome write must never fail silently into a resend:
-    // retry once, then fall back to needs_review. If even that write fails the
-    // record remains 'sending', whose replay reports the uncertainty and asks the
-    // user to check Sent mail — a stuck record can never cause a second send.
-    try {
-      await finishOutcome('accepted', messageId, null)
-    } catch (outcomeError) {
-      logSafeError('Send outcome persistence failed after Gmail acceptance', outcomeError)
-      try {
-        await finishOutcome('accepted', messageId, null)
-      } catch (retryError) {
-        logSafeError('Send outcome persistence retry failed after Gmail acceptance', retryError)
-        try {
-          await finishOutcome('needs_review', messageId, 'outcome_write_lost')
-        } catch (fallbackError) {
-          logSafeError('Send outcome needs_review fallback failed after Gmail acceptance', fallbackError)
-        }
-      }
+    // Gmail accepted. Retry the outcome write once, then fall back to
+    // needs_review. A stuck 'sending' row replays as uncertain and is never
+    // resent. A retry that does land continues into Sheets, history, and the
+    // refreshed cookie — the same path as a write that succeeded the first time.
+    const persisted = await persistAccepted(recordId, messageId)
+    if (!persisted) {
       return NextResponse.json({
-        success: true,
+        success: false,
         outcome: 'needs_review',
         uncertain: true,
         message_id: messageId,
         error: IN_PROGRESS_MESSAGE,
-      })
+      }, { status: 502 })
     }
 
     const dossier = body.dossier
@@ -451,7 +558,11 @@ export async function POST(request: NextRequest) {
         `
       } else {
         const db = getLocalDb()
-        db.prepare('INSERT INTO contact_history (brand_name, contact_role, contact_name, contact_email, method) VALUES (?, ?, ?, ?, ?)').run(dossier?.brand_name ?? '', body.role ?? '', contactName, to, 'email')
+        try {
+          db.prepare('INSERT INTO contact_history (brand_name, contact_role, contact_name, contact_email, method) VALUES (?, ?, ?, ?, ?)').run(dossier?.brand_name ?? '', body.role ?? '', contactName, to, 'email')
+        } finally {
+          db.close()
+        }
       }
     } catch {
       console.error('Failed to log contact history')
@@ -486,6 +597,14 @@ export async function POST(request: NextRequest) {
 
   } catch (error: unknown) {
     logSafeError('Send email request failed', error)
+    if (gmailAttempted) {
+      return NextResponse.json({
+        error: UNCERTAIN_MESSAGE,
+        outcome: 'needs_review',
+        uncertain: true,
+        ...(acceptedMessageId ? { message_id: acceptedMessageId } : {}),
+      }, { status: 502 })
+    }
     return NextResponse.json({ error: 'The email request could not be completed. Please try again.' }, { status: 500 })
   }
 }
