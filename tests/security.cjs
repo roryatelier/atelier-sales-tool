@@ -678,6 +678,24 @@ test('immediate send records enforce global request-id uniqueness and the accept
   assert.match(gmail, /missing_message_id/);
 });
 
+test('composer mints one request id per confirmation, retains it across retries and reloads, and gates uncertain sends on acknowledgement', () => {
+  const page = fs.readFileSync(path.join(root, 'app/email/page.tsx'), 'utf8')
+  // A request id is minted with WebCrypto when the user confirms a send.
+  assert.match(page, /crypto\.randomUuid|crypto\.randomUUID\(\)/, 'request id must be minted with crypto.randomUUID')
+  // It is sent with every attempt of the same confirmation.
+  assert.match(page, /request_id: requestId/, 'the send body must carry the current request id')
+  // It survives tab switches and reloads: snapshot field + persistence trigger.
+  assert.match(page, /sendRequestId: string/, 'TabSnapshot must carry the request id')
+  assert.match(page, /sendRequestId: t\.sendRequestId \?\? ''/, 'restored tabs must recover the request id defensively')
+  const depsIndex = page.indexOf('}, [email, draftProvenance, draftInstruction, sendRequestId')
+  assert.ok(depsIndex !== -1, 'persistence effect deps must include sendRequestId')
+  // Terminal outcomes reset the identity so the next confirmation is a new send;
+  // uncertainty is kept so a reload replays the recorded outcome, never a resend.
+  assert.match(page, /setSendRequestId\(''\)/)
+  assert.match(page, /Send anyway|sendAnyway/, 'uncertain state must offer an explicit acknowledged retry')
+  assert.match(page, /Check Sent mail before retrying|Check Sent mail/, 'uncertain state must tell the user to check Sent mail first')
+})
+
 test('signature API cannot read or write another account', async () => {
   const Database = require('better-sqlite3');
   const os = require('node:os');

@@ -86,6 +86,8 @@ interface TabSnapshot {
   activeTemplate: ActiveTemplate | null
   draftProvenance: DraftProvenance | null
   draftInstruction: string
+  sendRequestId: string
+  uncertainSend: boolean
   followUpContext: {original_subject?: string; contact_name?: string; date_sent?: string} | null
   selectedBullet: string
   outreachTiming: {recommended_day: string; recommended_date: string; day_reason: string; urgency: string; urgency_reason: string; signal_context: string | null; within_hours: number | null} | null
@@ -116,6 +118,8 @@ export default function EmailPage() {
   const [activeTemplate, setActiveTemplate] = useState<ActiveTemplate | null>(null)
   const [draftProvenance, setDraftProvenance] = useState<DraftProvenance | null>(null)
   const [draftInstruction, setDraftInstruction] = useState('')
+  const [sendRequestId, setSendRequestId] = useState('')
+  const [uncertainSend, setUncertainSend] = useState(false)
   const [roleSwitchedTo, setRoleSwitchedTo] = useState<string | null>(null)
   const [showContactDropdown, setShowContactDropdown] = useState(false)
   const [contactHistory, setContactHistory] = useState<{contact_role: string; sent_at: string}[]>([])
@@ -197,7 +201,7 @@ export default function EmailPage() {
     tabDataRef.current.set(activeTabIdRef.current, {
       id: activeTabIdRef.current, dossier, contact, selectedRole, email, loading, warning, error,
       trustGatePassed, sent, needsAuth, toEmail, ccEmail, bccEmail, showCc, showBcc,
-      activeTemplate, draftProvenance, draftInstruction, followUpContext, selectedBullet, outreachTiming,
+      activeTemplate, draftProvenance, draftInstruction, sendRequestId, uncertainSend, followUpContext, selectedBullet, outreachTiming,
       pitchAngles, pitchRoles, recommendedRole, selectedPitchRole
     })
   }
@@ -221,6 +225,8 @@ export default function EmailPage() {
     setActiveTemplate(snap.activeTemplate)
     setDraftProvenance(snap.draftProvenance ?? null)
     setDraftInstruction(snap.draftInstruction ?? '')
+    setSendRequestId(snap.sendRequestId ?? '')
+    setUncertainSend(snap.uncertainSend ?? false)
     setFollowUpContext(snap.followUpContext)
     setSelectedBullet(snap.selectedBullet)
     setOutreachTiming(snap.outreachTiming)
@@ -259,7 +265,7 @@ export default function EmailPage() {
       email: null, loading: false, warning: '', error: '',
       trustGatePassed: null, sent: false, needsAuth: false,
       toEmail: '', ccEmail: '', bccEmail: '', showCc: false, showBcc: false,
-      activeTemplate: null, draftProvenance: null, draftInstruction: '', followUpContext: null, selectedBullet: '',
+      activeTemplate: null, draftProvenance: null, draftInstruction: '', sendRequestId: '', uncertainSend: false, followUpContext: null, selectedBullet: '',
       outreachTiming, pitchAngles: {}, pitchRoles: ['CEO', 'CMO', 'Head of NPD'],
       recommendedRole: '', selectedPitchRole: 'CEO'
     }
@@ -279,7 +285,7 @@ export default function EmailPage() {
       email: null, loading: false, warning: '', error: '',
       trustGatePassed: null, sent: false, needsAuth: false,
       toEmail: c.email ?? '', ccEmail: '', bccEmail: '', showCc: false, showBcc: false,
-      activeTemplate: null, draftProvenance: null, draftInstruction: '', followUpContext: null, selectedBullet: '',
+      activeTemplate: null, draftProvenance: null, draftInstruction: '', sendRequestId: '', uncertainSend: false, followUpContext: null, selectedBullet: '',
       outreachTiming, pitchAngles: {}, pitchRoles: ['CEO', 'CMO', 'Head of NPD'],
       recommendedRole: '', selectedPitchRole: c.role
     }
@@ -353,6 +359,8 @@ export default function EmailPage() {
             loading: false,
             draftProvenance: t.draftProvenance ?? null,
             draftInstruction: t.draftInstruction ?? '',
+            sendRequestId: t.sendRequestId ?? '',
+            uncertainSend: t.uncertainSend ?? false,
           }))
           tabs.forEach(t => tabDataRef.current.set(t.id, t))
           setTabIds(tabs.map(t => t.id))
@@ -478,7 +486,7 @@ export default function EmailPage() {
       loading: false, warning, error,
       trustGatePassed, sent, needsAuth,
       toEmail, ccEmail, bccEmail, showCc, showBcc,
-      activeTemplate, draftProvenance, draftInstruction, followUpContext, selectedBullet, outreachTiming,
+      activeTemplate, draftProvenance, draftInstruction, sendRequestId, uncertainSend, followUpContext, selectedBullet, outreachTiming,
       pitchAngles, pitchRoles, recommendedRole, selectedPitchRole,
     })
     const allSnaps = tabIds
@@ -492,7 +500,7 @@ export default function EmailPage() {
       }))
     } catch {}
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [email, draftProvenance, draftInstruction, tabIds, activeTabId, tabPersistenceRevision])
+  }, [email, draftProvenance, draftInstruction, sendRequestId, uncertainSend, tabIds, activeTabId, tabPersistenceRevision])
 
   // Restore textarea cursor position after React commits the new email body to DOM.
   // requestAnimationFrame is unreliable in concurrent mode — useLayoutEffect fires
@@ -940,6 +948,14 @@ export default function EmailPage() {
     setError('')
 
     try {
+      // One confirmed message gets one stable identity: mint it at confirm time
+      // and retain it across network retries and reloads so the server replays
+      // the recorded outcome instead of sending again.
+      let requestId = sendRequestId
+      if (!requestId) {
+        requestId = crypto.randomUUID()
+        setSendRequestId(requestId)
+      }
       const res = await fetch('/api/send-email', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -950,6 +966,7 @@ export default function EmailPage() {
           subject: email.subject,
           emailBody: outboundBody(),
           expectedGoogleSub: userGoogleSub,
+          request_id: requestId,
           contactName: contact?.name ?? '',
           role: selectedRole,
           leadSource: userStorage.getItem('lead_source') ?? 'Outbound',
@@ -961,9 +978,21 @@ export default function EmailPage() {
 
       const data = await res.json()
 
-      if (data.reauth) { setNeedsAuth(true); setShowModal(false); return }
-      if (!res.ok || !data.success) { setError(typeof data.error === 'string' ? data.error : 'Failed to send email. Please try again.'); setShowModal(false); return }
+      if (data.reauth) { setSendRequestId(''); setNeedsAuth(true); setShowModal(false); return }
+      // Uncertain outcome: the record may or may not have reached Gmail. Keep the
+      // request id so a reload replays the recorded outcome, and require the user
+      // to acknowledge before any intentional new attempt.
+      if (data.outcome === 'needs_review' || data.uncertain) {
+        setUncertainSend(true)
+        setError('')
+        setShowModal(false)
+        return
+      }
+      if (data.outcome === 'failed') { setSendRequestId(''); setError(typeof data.error === 'string' ? data.error : 'Failed to send email. Please try again.'); setShowModal(false); return }
+      if (!res.ok || !data.success) { setSendRequestId(''); setError(typeof data.error === 'string' ? data.error : 'Failed to send email. Please try again.'); setShowModal(false); return }
 
+      setSendRequestId('')
+      setUncertainSend(false)
       setSent(true)
       setPipelineSynced(data.pipeline_synced ?? null)
       setShowModal(false)
@@ -1105,6 +1134,21 @@ export default function EmailPage() {
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: 'var(--orange-100)', border: '1px solid var(--orange-300)', borderRadius: 'var(--radius-md)', padding: '14px 18px', marginBottom: 24 }}>
           <div style={{ fontSize: 13, color: 'var(--orange-500)' }}>Gmail authorisation required before sending.</div>
           <a href="/api/auth/gmail" className="btn btn-primary btn-sm">Authorise Gmail</a>
+        </div>
+      )}
+
+      {uncertainSend && (
+        <div role="alert" style={{ background: 'var(--orange-100)', border: '1px solid var(--orange-300)', borderRadius: 'var(--radius-md)', padding: '14px 18px', marginBottom: 24, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+          <div style={{ fontSize: 13, color: 'var(--orange-500)', lineHeight: 1.5 }}>
+            Gmail did not confirm this send. Check Sent mail before retrying — the message may already have been delivered, and sending again could duplicate it.
+          </div>
+          <button
+            onClick={() => { setUncertainSend(false); setSendRequestId(''); setShowModal(true) }}
+            className="btn btn-primary btn-sm"
+            style={{ flexShrink: 0 }}
+          >
+            I&apos;ve checked Sent mail — Send anyway
+          </button>
         </div>
       )}
 
