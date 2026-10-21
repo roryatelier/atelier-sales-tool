@@ -64,6 +64,7 @@ function load(relative) {
       if (name === 'googleapis') return { google };
       if (name === 'better-sqlite3') return require('better-sqlite3');
       if (name === 'path') return require('path');
+      if (name === 'node:crypto') return require('node:crypto');
       if (name === '@vercel/postgres') return {
         sql: async (strings, ...values) => {
           providerCalls++;
@@ -174,7 +175,7 @@ test('every application API method rejects anonymous requests before provider wo
   function walk(dir) { return fs.readdirSync(dir, { withFileTypes: true }).flatMap(e => e.isDirectory() ? walk(path.join(dir, e.name)) : [path.join(dir, e.name)]); }
   for (const filename of walk(path.join(root, 'app/api')).filter(f => f.endsWith('route.ts') && !f.includes('/auth/') && !f.includes('/cron/'))) {
     const route = load(path.relative(root, filename));
-    for (const method of ['GET', 'POST', 'PUT', 'DELETE']) if (route[method]) {
+    for (const method of ['GET', 'POST', 'PUT', 'PATCH', 'DELETE']) if (route[method]) {
       const response = await route[method](new NextRequest('https://example.invalid/api/test', { method }));
       assert.equal(response.status, 401, filename + ':' + method);
       handlers++;
@@ -226,8 +227,8 @@ test('scheduled delivery requires ownership, encrypted credentials and non-retry
   assert.ok(scheduleSource.includes('credential_ciphertext'));
   assert.equal(scheduleSource.includes('gmail_refresh_token'), false);
   assert.equal(scheduleSource.includes('gmail_access_token'), false);
-  assert.ok(workerSource.includes('FOR UPDATE SKIP LOCKED'));
-  assert.ok(workerSource.includes("delivery_status = 'sending'"));
+  assert.ok(fs.readFileSync(path.join(root, 'lib/scheduled-email-store.ts'), 'utf8').includes('FOR UPDATE SKIP LOCKED'));
+  assert.ok(workerSource.includes('beginScheduledSend'));
   assert.ok(workerSource.includes("'needs_review', 'gmail_send_ambiguous'"));
   const cron = load('app/api/cron/send-scheduled-emails/route.ts').GET;
   assert.equal((await cron(new NextRequest('https://example.invalid/api/cron/send-scheduled-emails'))).status, 401);

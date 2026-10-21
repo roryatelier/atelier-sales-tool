@@ -104,6 +104,9 @@ export async function initialiseDb() {
     await sql`ALTER TABLE scheduled_emails ADD COLUMN IF NOT EXISTS sent_at TIMESTAMP`
     await sql`ALTER TABLE scheduled_emails ADD COLUMN IF NOT EXISTS gmail_message_id TEXT`
     await sql`ALTER TABLE scheduled_emails ADD COLUMN IF NOT EXISTS last_error_code TEXT`
+    await sql`ALTER TABLE scheduled_emails ADD COLUMN IF NOT EXISTS claim_token TEXT`
+    await sql`ALTER TABLE scheduled_emails ADD COLUMN IF NOT EXISTS send_intent_at TIMESTAMPTZ`
+    await sql`ALTER TABLE scheduled_emails ADD COLUMN IF NOT EXISTS next_attempt_at TIMESTAMPTZ`
     await sql`ALTER TABLE send_records ADD COLUMN IF NOT EXISTS owner_google_sub TEXT NOT NULL DEFAULT ''`
     await sql`ALTER TABLE send_records ADD COLUMN IF NOT EXISTS owner_email TEXT NOT NULL DEFAULT ''`
     await sql`ALTER TABLE send_records ADD COLUMN IF NOT EXISTS request_id TEXT NOT NULL DEFAULT ''`
@@ -216,6 +219,9 @@ export async function initialiseDb() {
       try { db.exec(`ALTER TABLE scheduled_emails ADD COLUMN sent_at TEXT`) } catch {}
       try { db.exec(`ALTER TABLE scheduled_emails ADD COLUMN gmail_message_id TEXT`) } catch {}
       try { db.exec(`ALTER TABLE scheduled_emails ADD COLUMN last_error_code TEXT`) } catch {}
+      try { db.exec(`ALTER TABLE scheduled_emails ADD COLUMN claim_token TEXT`) } catch {}
+      try { db.exec(`ALTER TABLE scheduled_emails ADD COLUMN send_intent_at TEXT`) } catch {}
+      try { db.exec(`ALTER TABLE scheduled_emails ADD COLUMN next_attempt_at TEXT`) } catch {}
       ensureSqliteSendRecords(db)
     } finally {
       db.close()

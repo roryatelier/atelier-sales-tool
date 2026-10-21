@@ -29,6 +29,20 @@ export async function refreshGmailToken(refreshToken: string): Promise<string | 
   }
 }
 
+// Scheduler distinguishes a revoked grant from an outage before any send intent.
+export async function refreshScheduledGmailToken(refreshToken: string): Promise<{ accessToken?: string; reauth?: boolean }> {
+  try {
+    const response = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ client_id: process.env.GMAIL_CLIENT_ID ?? '', client_secret: process.env.GMAIL_CLIENT_SECRET ?? '', refresh_token: refreshToken, grant_type: 'refresh_token' }),
+      signal: AbortSignal.timeout(15_000),
+    })
+    const data = await response.json()
+    if (response.ok && typeof data.access_token === 'string' && data.access_token.trim()) return { accessToken: data.access_token }
+    return { reauth: response.status === 400 && data.error === 'invalid_grant' }
+  } catch { return {} }
+}
+
 export async function sendViaGmail(accessToken: string, raw: string): Promise<string> {
   const oauth2 = new google.auth.OAuth2(
     process.env.GMAIL_CLIENT_ID,

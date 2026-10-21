@@ -7,6 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
+    "test:scheduled": "node --test tests/scheduled-recovery.cjs tests/scheduled-ui.cjs",
     "test:security": "node --test tests/security.cjs",
     "test:email": "node --test tests/email-provider.cjs",
     "test:email-content": "node --test tests/email-content.cjs",
@@ -21,7 +22,7 @@
     "check:env": "node scripts/check-env-contract.mjs",
     "check:env-schema": "node scripts/check-env-contract.mjs --schema-only",
     "check:deployment-target": "node scripts/check-deployment-target.mjs",
-    "verify:ci": "npm run check:types && npm run test:security && npm run test:provider && npm run test:email && npm run test:email-content && npm run test:signature && npm run test:signature:ui && npm run test:research && npm run test:lusha && npm run test:lusha:ui && npm run check:provider-policy && npm run check:env-schema && npm run build",
+    "verify:ci": "npm run check:types && npm run test:scheduled && npm run test:security && npm run test:provider && npm run test:email && npm run test:email-content && npm run test:signature && npm run test:signature:ui && npm run test:research && npm run test:lusha && npm run test:lusha:ui && npm run check:provider-policy && npm run check:env-schema && npm run build",
     "verify:release": "npm run verify:ci && npm run check:env && npm run check:deployment-target"
   },
   "dependencies": {

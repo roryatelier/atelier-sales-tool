@@ -2,7 +2,8 @@ import { authorizeRequest } from '@/lib/api-auth'
 import { initialiseDb, isVercel, getLocalDb } from '@/lib/db'
 import { sealGmailCredentials } from '@/lib/auth-policy'
 import { getGmailCredentials } from '@/lib/session'
-import { refreshGmailToken } from '@/lib/gmail'
+import { cancelScheduledEmail, resumeScheduledEmail } from '@/lib/scheduled-email-store'
+import { refreshGmailToken, refreshScheduledGmailToken } from '@/lib/gmail'
 import { NextRequest, NextResponse } from 'next/server'
 
 const EMAIL = /^[^\s<>@]+@[^\s<>@]+\.[^\s<>@]+$/
@@ -71,10 +72,12 @@ export async function POST(request: NextRequest) {
         (to_email, cc, bcc, subject, body, brand_name, contact_name, scheduled_at, timezone, sent_by, dossier_json, owner_google_sub, owner_email, credential_ciphertext, delivery_status)
         VALUES (${to.trim()}, ${cc ?? ''}, ${bcc ?? ''}, ${subject}, ${emailBody}, ${brand_name ?? ''}, ${contact_name ?? ''}, ${scheduledAt.toISOString()}, ${timezone}, ${auth.session.email}, ${dossierJson}, ${auth.session.googleSub}, ${auth.session.email}, ${credentialCiphertext}, 'pending')`
     } else {
-      getLocalDb().prepare(`INSERT INTO scheduled_emails
+      const db = getLocalDb()
+      try { db.prepare(`INSERT INTO scheduled_emails
         (to_email, cc, bcc, subject, body, brand_name, contact_name, scheduled_at, timezone, sent_by, dossier_json, owner_google_sub, owner_email, credential_ciphertext, delivery_status)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`)
         .run(to.trim(), cc ?? '', bcc ?? '', subject, emailBody, brand_name ?? '', contact_name ?? '', scheduledAt.toISOString(), timezone, auth.session.email, dossierJson, auth.session.googleSub, auth.session.email, credentialCiphertext)
+      } finally { db.close() }
     }
     return NextResponse.json({ success: true, scheduled_at: scheduledAt.toISOString() })
   } catch {
@@ -91,12 +94,15 @@ export async function GET(request: NextRequest) {
     if (isVercel) {
       const { sql } = await import('@vercel/postgres')
       const result = await sql`SELECT id, to_email, cc, subject, brand_name, contact_name, scheduled_at, timezone, delivery_status, last_error_code
-        FROM scheduled_emails WHERE owner_google_sub = ${auth.session.googleSub} AND delivery_status IN ('pending', 'sending', 'needs_reauth', 'needs_review') ORDER BY scheduled_at ASC`
-      return NextResponse.json({ success: true, emails: result.rows, paused: false })
+        FROM scheduled_emails WHERE owner_google_sub = ${auth.session.googleSub} AND delivery_status IN ('pending', 'claimed', 'sending', 'needs_reauth', 'needs_review') ORDER BY scheduled_at ASC`
+      return NextResponse.json({ success: true, emails: result.rows, paused: false, owner_google_sub: auth.session.googleSub })
     }
-    const emails = getLocalDb().prepare(`SELECT id, to_email, cc, subject, brand_name, contact_name, scheduled_at, timezone, delivery_status, last_error_code
-      FROM scheduled_emails WHERE owner_google_sub = ? AND delivery_status IN ('pending', 'sending', 'needs_reauth', 'needs_review') ORDER BY scheduled_at ASC`).all(auth.session.googleSub)
-    return NextResponse.json({ success: true, emails, paused: false })
+    const db = getLocalDb()
+    try {
+      const emails = db.prepare(`SELECT id, to_email, cc, subject, brand_name, contact_name, scheduled_at, timezone, delivery_status, last_error_code
+        FROM scheduled_emails WHERE owner_google_sub = ? AND delivery_status IN ('pending', 'claimed', 'sending', 'needs_reauth', 'needs_review') ORDER BY scheduled_at ASC`).all(auth.session.googleSub)
+      return NextResponse.json({ success: true, emails, paused: false, owner_google_sub: auth.session.googleSub })
+    } finally { db.close() }
   } catch {
     console.error('Fetch scheduled emails failed')
     return NextResponse.json({ error: 'Failed to fetch scheduled emails' }, { status: 500 })
@@ -106,21 +112,33 @@ export async function GET(request: NextRequest) {
 export async function DELETE(request: NextRequest) {
   const auth = await authorizeRequest(request)
   if (auth.error) return auth.error
+  if (request.nextUrl.searchParams.get('expectedGoogleSub') !== auth.session.googleSub) return NextResponse.json({ error: 'Your Google account changed. Reload before cancelling.' }, { status: 409 })
   const id = Number(request.nextUrl.searchParams.get('id'))
   if (!Number.isSafeInteger(id) || id < 1) return NextResponse.json({ error: 'Valid id is required' }, { status: 400 })
   try {
     await initialiseDb()
-    let deleted = 0
-    if (isVercel) {
-      const { sql } = await import('@vercel/postgres')
-      const result = await sql`DELETE FROM scheduled_emails WHERE id = ${id} AND owner_google_sub = ${auth.session.googleSub} AND delivery_status = 'pending' RETURNING id`
-      deleted = result.rowCount ?? 0
-    } else {
-      deleted = getLocalDb().prepare(`DELETE FROM scheduled_emails WHERE id = ? AND owner_google_sub = ? AND delivery_status = 'pending'`).run(id, auth.session.googleSub).changes
-    }
-    return deleted ? NextResponse.json({ success: true }) : NextResponse.json({ error: 'Scheduled email not found or already processing' }, { status: 404 })
+    const cancelled = await cancelScheduledEmail(id, auth.session.googleSub)
+    return cancelled ? NextResponse.json({ success: true }) : NextResponse.json({ error: 'Unable to cancel: the job is missing or Gmail may already have been called. Refresh to check its status.' }, { status: 409 })
   } catch {
     console.error('Cancel scheduled email failed')
     return NextResponse.json({ error: 'Failed to cancel scheduled email' }, { status: 500 })
   }
+}
+
+export async function PATCH(request: NextRequest) {
+  const auth = await authorizeRequest(request)
+  if (auth.error) return auth.error
+  try {
+    const body = await request.json()
+    if (body.expectedGoogleSub !== auth.session.googleSub) return NextResponse.json({ error: 'Your Google account changed. Reload before resuming.' }, { status: 409 })
+    if (!Number.isSafeInteger(body.id) || body.id < 1 || body.action !== 'resume') return NextResponse.json({ error: 'Valid job and resume action required' }, { status: 400 })
+    const credentials = await getGmailCredentials(auth.session)
+    if (!credentials?.refreshToken) return NextResponse.json({ error: 'Reconnect Gmail first', reauth: true }, { status: 401 })
+    const refresh = await refreshScheduledGmailToken(credentials.refreshToken)
+    if (!refresh.accessToken) return NextResponse.json({ error: refresh.reauth ? 'Reconnect Gmail and try again.' : 'Gmail is temporarily unavailable. Try resuming again later.', reauth: refresh.reauth === true }, { status: refresh.reauth ? 401 : 503 })
+    const ciphertext = await sealGmailCredentials({ ...auth.session, accessToken: refresh.accessToken, refreshToken: credentials.refreshToken })
+    await initialiseDb()
+    const resumed = await resumeScheduledEmail(body.id, auth.session.googleSub, ciphertext)
+    return resumed ? NextResponse.json({ success: true }) : NextResponse.json({ error: 'This job cannot be safely resumed. Refresh its status.' }, { status: 409 })
+  } catch { return NextResponse.json({ error: 'Failed to resume scheduled email' }, { status: 500 }) }
 }
