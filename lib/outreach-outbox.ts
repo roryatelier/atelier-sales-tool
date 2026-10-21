@@ -47,15 +47,17 @@ export async function syncPipelineSource(sourceKey: string, owner: string) {
   if (!rows[0]) return null
   return syncPipelineExport(String(rows[0].outreach_id), owner)
 }
-export async function recoverPipelineExports() {
+export async function recoverPipelineExports(owner?: string) {
   const before = new Date(Date.now() - 5 * 60_000).toISOString()
   const expired = isVercel ? 'claimed_at < ?' : 'datetime(claimed_at) < datetime(?)'
   await query(`UPDATE outreach_exports SET status = CASE WHEN write_intent_at IS NULL THEN 'failed' ELSE 'needs_review' END,
     claim_token = NULL, last_error_code = 'worker_interrupted', next_attempt_at = NULL
-    WHERE status IN ('claimed','writing') AND (${isVercel ? 'claimed_at IS NULL' : 'datetime(claimed_at) IS NULL'} OR ${expired}) RETURNING outreach_id`, [before])
+    WHERE status IN ('claimed','writing') AND (${isVercel ? 'claimed_at IS NULL' : 'datetime(claimed_at) IS NULL'} OR ${expired})${owner === undefined ? '' : ' AND owner_google_sub = ?'} RETURNING outreach_id`, owner === undefined ? [before] : [before, owner])
 }
 
 export async function syncPipelineExport(outreachId: string, owner: string): Promise<ExportStatus | null> {
+  // Manual retries must recover expired leases even when cron is unavailable.
+  await recoverPipelineExports(owner)
   const token = randomUUID()
   const rows = await query(`UPDATE outreach_exports SET status = 'claimed', claim_token = ?, claimed_at = ?, attempt_count = attempt_count + 1
     WHERE outreach_id = ? AND owner_google_sub = ? AND status IN ('pending','failed','needs_review') RETURNING *`, [token, new Date().toISOString(), outreachId, owner])
@@ -104,6 +106,7 @@ export async function processPipelineExports(limit = 3) {
   for (const row of rows) await syncPipelineExport(String(row.outreach_id), String(row.owner_google_sub))
 }
 export async function listPipelineExports(owner: string) {
+  await recoverPipelineExports(owner)
   const rows = await query(`SELECT outreach_id, payload, status, last_error_code, accepted_at, synced_at FROM outreach_exports
     WHERE owner_google_sub = ? AND status != 'synced' ORDER BY accepted_at, outreach_id LIMIT 100`, [owner])
   return rows.map(row => {

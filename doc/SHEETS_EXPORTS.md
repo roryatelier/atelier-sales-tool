@@ -41,7 +41,9 @@ inline migrations and equivalent triggers. No historical event is inferred.
 An export starts `pending`, is atomically `claimed`, then records `writing` only
 immediately before the actual Sheets write. Each attempt has a token. A stale
 claim without a write intent may retry after five minutes. An interrupted write
-becomes `needs_review`. A fresh attempt always looks for the existing outreach ID
+becomes `needs_review`. Listing exports and manually retrying also recover expired
+claims for the signed-in owner, so recovery does not depend on cron. Active claims
+are left alone. A fresh attempt always looks for the existing outreach ID
 before writing. If it finds that ID exactly once, it marks the export `synced`.
 
 A timeout or missing response after write intent does not prove a failed write.

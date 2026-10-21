@@ -289,3 +289,36 @@ test('SQLite naive acceptance timestamps are interpreted as UTC on a non-UTC hos
   assert.equal(actual,new Date('2026-01-01T16:00:00Z').toLocaleDateString('en-AU',{timeZone:'Australia/Sydney'}))
  }finally{if(previous===undefined)delete process.env.TZ;else process.env.TZ=previous}
 })
+
+
+test('manual listing recovers only expired claims belonging to the signed-in owner',async()=>{
+ const {NextRequest}=require('next/server');const f=await fixture();const db=f.db();try{
+  const stale=await accepted(f);const uncertain=await accepted(f);const fresh=await accepted(f);const foreign=await accepted(f,'other')
+  db.prepare("UPDATE outreach_exports SET status='claimed',claimed_at=datetime('now','-10 minutes'),claim_token='old'").run()
+  db.prepare("UPDATE outreach_exports SET status='writing',write_intent_at=datetime('now','-10 minutes') WHERE outreach_id=?").run(uncertain)
+  db.prepare("UPDATE outreach_exports SET claimed_at=? WHERE outreach_id=?").run(new Date().toISOString(),fresh)
+  const api=f.load('app/api/pipeline-exports/route.ts')
+  const response=await api.GET(new NextRequest('https://example.invalid/api/pipeline-exports'))
+  assert.equal(response.status,200)
+  const jobs=(await response.json()).exports
+  assert.equal(jobs.find(job=>job.outreach_id===stale).status,'failed')
+  assert.equal(jobs.find(job=>job.outreach_id===uncertain).status,'needs_review')
+  assert.equal(jobs.find(job=>job.outreach_id===fresh).status,'claimed')
+  assert.equal(db.prepare('SELECT status FROM outreach_exports WHERE outreach_id=?').get(foreign).status,'claimed')
+  assert.equal(db.prepare('SELECT claim_token FROM outreach_exports WHERE outreach_id=?').get(stale).claim_token,null)
+  assert.equal(f.behavior.appends,0)
+ }finally{db.close();f.close()}
+})
+test('manual retry recovers expired preparation but only reconciles interrupted writes',async()=>{
+ const {NextRequest}=require('next/server');const f=await fixture();const db=f.db();try{
+  const stale=await accepted(f);const uncertain=await accepted(f)
+  db.prepare("UPDATE outreach_exports SET status='claimed',claimed_at=datetime('now','-10 minutes'),claim_token='old'").run()
+  db.prepare("UPDATE outreach_exports SET status='writing',write_intent_at=datetime('now','-10 minutes'),destination_id='synthetic-sheet' WHERE outreach_id=?").run(uncertain)
+  const api=f.load('app/api/pipeline-exports/route.ts')
+  const retry=id=>api.POST(new NextRequest('https://example.invalid/api/pipeline-exports',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({outreach_id:id,expectedGoogleSub:'owner'})}))
+  assert.equal((await (await retry(stale)).json()).status,'synced');assert.equal(f.behavior.appends,1)
+  assert.equal((await (await retry(uncertain)).json()).status,'needs_review');assert.equal(f.behavior.appends,1)
+  f.behavior.rows.push({id:uncertain,range:'Sheet1!A3:S3'})
+  assert.equal((await (await retry(uncertain)).json()).status,'synced');assert.equal(f.behavior.appends,1)
+ }finally{db.close();f.close()}
+})
