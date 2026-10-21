@@ -47,6 +47,25 @@ before PRs #8–#11; this update takes precedence where they differ.
 5. **Release health.** A public health response and a post-deploy canary are not in the repo. CI `verify` does not call live providers.
 6. **Remaining doc drift** in handover and prompt notes, without copying prospect or operator data into the repo.
 
+### Immediate-send retries (#13)
+
+The implementation adds durable send records, payload-bound request IDs, atomic claims,
+accepted/failed/review outcomes, and replay without another Gmail call. The
+composer saves the confirmation before contacting the server, restores each
+tab's attachments and request identity after reload, and routes late outcomes
+to the originating draft. Browser storage failure blocks that attempt.
+Atomic IndexedDB claims share identities across browser documents for the same
+saved draft. Draft fingerprints use SHA-256 instead of copying attachment data
+into confirmation keys. Stale snapshot writes cannot erase shared identities.
+
+Review corrections also repair earlier SQLite send-record schemas without
+discarding valid records; incompatible records fail closed. Disposable native
+PostgreSQL verification exercised the actual schema and route SQL with mocked
+Gmail: 12 concurrent identical requests caused one Gmail attempt. This checks SQL
+and concurrency through a local PostgreSQL adapter, not Neon transport or live
+delivery. Production migration and a deliberately approved internal send remain
+release checks. Scheduler recovery and the Sheets ledger/outbox remain separate.
+
 ## Done
 
 ### Access containment in the application

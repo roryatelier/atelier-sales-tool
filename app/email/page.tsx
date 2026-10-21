@@ -10,6 +10,8 @@ import {
   generatedDraftProvenance,
   type DraftProvenance,
 } from '@/lib/email-template-provenance'
+import { confirmedSendDraftContent, compactConfirmedSendKey, createConfirmedSendLedger, shouldRetainRequestId, type RetainedSend } from '@/lib/send-confirmation'
+import { claimStoredSendId, forgetStoredSendId } from '@/lib/send-confirmation-store'
 
 import React, { useEffect, useLayoutEffect, useState, useRef, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
@@ -93,6 +95,12 @@ interface TabSnapshot {
   pitchRoles: string[]
   recommendedRole: string
   selectedPitchRole: string
+  confirmedRequestId?: string | null
+  confirmedDraftKey?: string | null
+  parkedSends?: { requestId: string; draftKey: string }[]
+  attachments?: { name: string; type: string; data: string }[]
+  pipelineSynced?: boolean | null
+  confirmationScope?: string
 }
 
 export default function EmailPage() {
@@ -167,6 +175,12 @@ export default function EmailPage() {
   const pendingContactForTabRef = useRef<Contact | null>(null)
   // Set only from localStorage load — never cleared by tab switching — used as send-time fallback
   const followUpContextRef = useRef<{original_subject?: string; contact_name?: string; date_sent?: string} | null>(null)
+  // One request id per confirmed draft, kept per tab so a retry of an uncertain
+  // send cannot mint a second id. A changed draft claims a new id.
+  const confirmedSendsRef = useRef(createConfirmedSendLedger())
+  const sendInFlightRef = useRef(false)
+  const mountedRef = useRef(true)
+  const activeDraftKeyRef = useRef('')
   const bodyTextareaRef = useRef<HTMLTextAreaElement>(null)
   const pendingSelectionRef = useRef<[number, number] | null>(null)
   const linkInputRef = useRef<HTMLInputElement>(null)
@@ -178,6 +192,13 @@ export default function EmailPage() {
   const [signatureError, setSignatureError] = useState('')
   const signatureRef = useRef('')
   signatureRef.current = signature
+  useLayoutEffect(() => {
+    activeDraftKeyRef.current = draftKeyForActiveTab()
+  })
+  useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
 
   function getTabLabel(id: string): string {
     if (id === activeTabId) {
@@ -193,13 +214,35 @@ export default function EmailPage() {
     return brand
   }
 
+  function retainedSnapshot(id: string): Pick<TabSnapshot, 'confirmedRequestId' | 'confirmedDraftKey' | 'parkedSends'> {
+    const retained = confirmedSendsRef.current.current(id)
+    return {
+      confirmedRequestId: retained?.requestId ?? null,
+      confirmedDraftKey: retained?.draftKey ?? null,
+      parkedSends: confirmedSendsRef.current.parked(id),
+    }
+  }
+
   function saveCurrentTab(): void {
     tabDataRef.current.set(activeTabIdRef.current, {
       id: activeTabIdRef.current, dossier, contact, selectedRole, email, loading, warning, error,
       trustGatePassed, sent, needsAuth, toEmail, ccEmail, bccEmail, showCc, showBcc,
       activeTemplate, draftProvenance, draftInstruction, followUpContext, selectedBullet, outreachTiming,
-      pitchAngles, pitchRoles, recommendedRole, selectedPitchRole
+      pitchAngles, pitchRoles, recommendedRole, selectedPitchRole,
+      attachments, pipelineSynced,
+      confirmationScope: tabDataRef.current.get(activeTabIdRef.current)?.confirmationScope ?? crypto.randomUUID(),
+      ...retainedSnapshot(activeTabIdRef.current),
     })
+  }
+
+  function persistTabSnapshots(): void {
+    userStorage.setItem('email_tabs', JSON.stringify({
+      brandName: dossier?.brand_name,
+      activeTabId: activeTabIdRef.current,
+      tabs: [...tabDataRef.current.values()].map(snap => ({
+        ...snap, loading: false, ...retainedSnapshot(snap.id),
+      })),
+    }))
   }
 
   const applyTabSnapshot = useCallback((snap: TabSnapshot): void => {
@@ -212,6 +255,8 @@ export default function EmailPage() {
     setError(snap.error)
     setTrustGatePassed(snap.trustGatePassed)
     setSent(snap.sent)
+    setPipelineSynced(snap.pipelineSynced ?? null)
+    setAttachments(snap.attachments ?? [])
     setNeedsAuth(snap.needsAuth)
     setToEmail(snap.toEmail)
     setCcEmail(snap.ccEmail)
@@ -304,6 +349,7 @@ export default function EmailPage() {
       }
     }
     tabDataRef.current.delete(id)
+    confirmedSendsRef.current.forget(id)
     setTabIds(prev => prev.filter(tid => tid !== id))
   }
 
@@ -353,8 +399,15 @@ export default function EmailPage() {
             loading: false,
             draftProvenance: t.draftProvenance ?? null,
             draftInstruction: t.draftInstruction ?? '',
+            confirmationScope: t.confirmationScope ?? JSON.stringify(['legacy', parsedDossier.brand_name, t.id]),
           }))
-          tabs.forEach(t => tabDataRef.current.set(t.id, t))
+          tabs.forEach(t => {
+            tabDataRef.current.set(t.id, t)
+            const restored: RetainedSend | null = t.confirmedRequestId && t.confirmedDraftKey
+              ? { requestId: t.confirmedRequestId, draftKey: t.confirmedDraftKey }
+              : null
+            confirmedSendsRef.current.restore(t.id, restored, t.parkedSends ?? [])
+          })
           setTabIds(tabs.map(t => t.id))
           tabCounterRef.current = Math.max(0, ...tabs.map(t => {
             const n = parseInt((t.id || '').split('-')[1] || '0')
@@ -472,27 +525,12 @@ export default function EmailPage() {
   // Persist open tabs to localStorage so they survive navigation away and back
   useEffect(() => {
     if (!checked || !dossier) return
-    tabDataRef.current.set(activeTabIdRef.current, {
-      id: activeTabIdRef.current,
-      dossier, contact, selectedRole, email,
-      loading: false, warning, error,
-      trustGatePassed, sent, needsAuth,
-      toEmail, ccEmail, bccEmail, showCc, showBcc,
-      activeTemplate, draftProvenance, draftInstruction, followUpContext, selectedBullet, outreachTiming,
-      pitchAngles, pitchRoles, recommendedRole, selectedPitchRole,
-    })
-    const allSnaps = tabIds
-      .map(id => tabDataRef.current.get(id))
-      .filter((s): s is TabSnapshot => s != null)
+    saveCurrentTab()
     try {
-      userStorage.setItem('email_tabs', JSON.stringify({
-        brandName: dossier.brand_name as string,
-        activeTabId: activeTabIdRef.current,
-        tabs: allSnaps,
-      }))
+      persistTabSnapshots()
     } catch {}
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [email, draftProvenance, draftInstruction, tabIds, activeTabId, tabPersistenceRevision])
+  }, [email, draftProvenance, draftInstruction, tabIds, activeTabId, tabPersistenceRevision, toEmail, ccEmail, bccEmail, attachments, sent, pipelineSynced, needsAuth, error])
 
   // Restore textarea cursor position after React commits the new email body to DOM.
   // requestAnimationFrame is unreliable in concurrent mode — useLayoutEffect fires
@@ -930,67 +968,148 @@ export default function EmailPage() {
     e.target.value = ''
   }
 
+  function draftKeyForActiveTab(): string {
+    return confirmedSendDraftContent({
+      to: toEmail,
+      cc: ccEmail,
+      bcc: bccEmail,
+      subject: email?.subject ?? '',
+      emailBody: outboundBody(),
+      attachments,
+    })
+  }
+
   async function handleSend() {
-    if (!email) return
+    if (!email || sendInFlightRef.current) return
     if (!matchesDraftIdentity(userGoogleSub, userGoogleSub)) {
       setError('Account changed. Reload before sending this draft.')
       return
     }
+    const tabId = activeTabIdRef.current
+    const owner = userGoogleSub
+    const draftContent = draftKeyForActiveTab()
+    const confirmedDraft = {
+      to: toEmail, cc: ccEmail, bcc: bccEmail, subject: email.subject,
+      emailBody: outboundBody(), attachments: attachments.map(attachment => ({ ...attachment })),
+    }
+    let requestId = ''
+    let attempted = false
+    sendInFlightRef.current = true
     setSending(true)
     setError('')
 
+    function applyResult(patch: Partial<Pick<TabSnapshot, 'error' | 'sent' | 'needsAuth' | 'pipelineSynced'>>) {
+      if (!mountedRef.current || !matchesDraftIdentity(owner, owner)) return
+      const snap = tabDataRef.current.get(tabId)
+      const isActive = activeTabIdRef.current === tabId
+      const currentKey = isActive ? activeDraftKeyRef.current : snap?.email ? confirmedSendDraftContent({
+        to: snap.toEmail, cc: snap.ccEmail, bcc: snap.bccEmail,
+        subject: snap.email.subject,
+        emailBody: appendSignature(snap.email.body, signatureRef.current),
+        attachments: snap.attachments ?? [],
+      }) : null
+      if (snap && currentKey === draftContent) {
+        tabDataRef.current.set(tabId, { ...snap, ...patch })
+        if (isActive) {
+          if (patch.error !== undefined) setError(patch.error)
+          if (patch.sent !== undefined) setSent(patch.sent)
+          if (patch.needsAuth !== undefined) setNeedsAuth(patch.needsAuth)
+          if (patch.pipelineSynced !== undefined) setPipelineSynced(patch.pipelineSynced)
+          setShowModal(false)
+        }
+      }
+      // The pre-send snapshot already retains this identity if a later write
+      // fails. Never turn an accepted send into a new sendable confirmation.
+      try { persistTabSnapshots() } catch { /* keep the durable pre-send identity */ }
+      setTabPersistenceRevision(revision => revision + 1)
+    }
+
     try {
+      // Capture the originating tab before the first await. Shared IndexedDB
+      // claims serialize across browser documents; whole draft snapshots may
+      // be overwritten by another document without losing this identity.
+      saveCurrentTab()
+      const confirmationScope = tabDataRef.current.get(tabId)!.confirmationScope!
+      const metadata = {
+        expectedGoogleSub: owner, contactName: contact?.name ?? '', role: selectedRole,
+        leadSource: userStorage.getItem('lead_source') ?? 'Outbound',
+        senderName: userStorage.getItem('atelier_user_name') ?? '', dossier,
+      }
+      for (const id of tabDataRef.current.keys()) await confirmedSendsRef.current.compact(id)
+      const draftKey = await compactConfirmedSendKey(draftContent)
+      const storedDraftScope = await compactConfirmedSendKey(confirmationScope)
+      if (!mountedRef.current || !matchesDraftIdentity(owner, owner)) return
+      const preferred = confirmedSendsRef.current.claim(tabId, draftKey)
+      requestId = await claimStoredSendId(owner, storedDraftScope, draftKey, preferred)
+      if (!mountedRef.current || !matchesDraftIdentity(owner, owner)) return
+      confirmedSendsRef.current.adopt(tabId, { requestId, draftKey })
+      persistTabSnapshots()
+      attempted = true
       const res = await fetch('/api/send-email', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          to: toEmail,
-          cc: ccEmail,
-          bcc: bccEmail,
-          subject: email.subject,
-          emailBody: outboundBody(),
-          expectedGoogleSub: userGoogleSub,
-          contactName: contact?.name ?? '',
-          role: selectedRole,
-          leadSource: userStorage.getItem('lead_source') ?? 'Outbound',
-          senderName: userStorage.getItem('atelier_user_name') ?? '',
-          dossier,
-          attachments: attachments.length > 0 ? attachments : undefined
+          ...metadata,
+          ...confirmedDraft,
+          attachments: confirmedDraft.attachments.length > 0 ? confirmedDraft.attachments : undefined,
+          request_id: requestId,
         })
       })
 
-      const data = await res.json()
+      let data: { reauth?: boolean; success?: boolean; error?: unknown; uncertain?: boolean; outcome?: string; pipeline_synced?: boolean | null } = {}
+      try {
+        data = await res.json()
+      } catch {
+        // The response never arrived in a readable form. Keep the request id.
+        applyResult({ error: 'Gmail did not confirm this send. Check Sent mail before trying again.' })
+        return
+      }
 
-      if (data.reauth) { setNeedsAuth(true); setShowModal(false); return }
-      if (!res.ok || !data.success) { setError(typeof data.error === 'string' ? data.error : 'Failed to send email. Please try again.'); setShowModal(false); return }
+      if (!mountedRef.current || !matchesDraftIdentity(owner, owner)) return
+      const observation = {
+        kind: 'response' as const,
+        httpStatus: res.status,
+        success: data.success === true,
+        uncertain: data.uncertain === true,
+        outcome: typeof data.outcome === 'string' ? data.outcome : undefined,
+      }
+      // Never discard shared identity on an unclassified replay failure. A
+      // failed cleanup also keeps it, so a late reply cannot unlock a resend.
+      let observed = true
+      if (!observation.success && !shouldRetainRequestId(observation)) {
+        try { await forgetStoredSendId(owner, storedDraftScope, draftKey, requestId) } catch { observed = false }
+      }
+      if (!mountedRef.current || !matchesDraftIdentity(owner, owner)) return
+      if (observed) confirmedSendsRef.current.observe(tabId, requestId, observation)
 
-      setSent(true)
-      setPipelineSynced(data.pipeline_synced ?? null)
-      setShowModal(false)
+      if (data.reauth) { applyResult({ needsAuth: true }); return }
+      if (!res.ok || !data.success) { applyResult({ error: typeof data.error === 'string' ? data.error : 'Gmail did not confirm this send. Check Sent mail before trying again.' }); return }
 
-      const lsRaw = userStorage.getItem('follow_up_context')
-      const effectiveFollowUp = followUpContextRef.current ?? followUpContext ?? (lsRaw ? JSON.parse(lsRaw) : null)
-      console.log('[follow-up] at send time — ref:', followUpContextRef.current, 'state:', followUpContext, 'localStorage:', lsRaw, 'effective:', effectiveFollowUp)
+      applyResult({ sent: true, error: '', pipelineSynced: data.pipeline_synced ?? null })
 
-      if (effectiveFollowUp && dossier) {
-        console.log('[follow-up] calling /api/update-pipeline with:', { brand_name: dossier.brand_name, status: 'Follow-up 1' })
-        userStorage.removeItem('follow_up_context')
-        followUpContextRef.current = null
-        fetch('/api/update-pipeline', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ brand_name: dossier.brand_name, status: 'Follow-up 1' }),
-        })
-          .then(r => r.json().then(body => console.log('[follow-up] update-pipeline response:', r.status, body)))
-          .catch(err => console.error('[follow-up] update-pipeline fetch error:', err))
-      } else {
-        console.log('[follow-up] skipping update-pipeline — no follow-up context or no dossier')
+      try {
+        const lsRaw = userStorage.getItem('follow_up_context')
+        const effectiveFollowUp = followUpContext ?? (lsRaw ? JSON.parse(lsRaw) : null)
+        if (effectiveFollowUp && dossier) {
+          userStorage.removeItem('follow_up_context')
+          followUpContextRef.current = null
+          fetch('/api/update-pipeline', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ brand_name: dossier.brand_name, status: 'Follow-up 1' }),
+          }).catch(() => console.error('Follow-up pipeline update failed'))
+        }
+      } catch {
+        // Secondary bookkeeping cannot change Gmail acceptance or invite a resend.
+        console.error('Follow-up pipeline update unavailable after send')
       }
     } catch {
-      setError('Something went wrong. Please try again.')
-      setShowModal(false)
+      applyResult({ error: attempted
+        ? 'Gmail did not confirm this send. Check Sent mail before trying again.'
+        : 'Could not save this confirmation safely. Free browser storage and try again. This attempt was not sent.' })
     } finally {
-      setSending(false)
+      sendInFlightRef.current = false
+      if (mountedRef.current) setSending(false)
     }
   }
 
@@ -1079,7 +1198,7 @@ export default function EmailPage() {
       </p>
 
       {sent && (
-        <div style={{ background: pipelineSynced === false ? 'var(--orange-100)' : 'var(--green-100)', border: `1px solid ${pipelineSynced === false ? 'var(--orange-300)' : 'var(--green-300)'}`, borderRadius: 'var(--radius-md)', padding: '24px', marginBottom: 24, textAlign: 'center' }}>
+        <div style={{ background: pipelineSynced !== true ? 'var(--orange-100)' : 'var(--green-100)', border: `1px solid ${pipelineSynced !== true ? 'var(--orange-300)' : 'var(--green-300)'}`, borderRadius: 'var(--radius-md)', padding: '24px', marginBottom: 24, textAlign: 'center' }}>
           <div style={{ width: 48, height: 48, borderRadius: '50%', background: 'var(--green-400)', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 12px' }}>
             <svg width="22" height="22" fill="none" stroke="#fff" viewBox="0 0 24 24">
               <polyline points="20,6 9,17 4,12" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"/>
@@ -1089,9 +1208,11 @@ export default function EmailPage() {
           <div style={{ fontSize: 13, color: 'var(--green-400)', marginBottom: 20 }}>
             Sent to {contact?.name ? `${contact.name}${contact.role ? ` · ${contact.role}` : ''} · ${toEmail}` : toEmail}
           </div>
-          {pipelineSynced === false && (
+          {pipelineSynced !== true && (
             <div style={{ fontSize: 13, color: 'var(--orange-500)', margin: '-8px auto 20px', maxWidth: 560 }}>
-              The email was sent, but it was not recorded in the pipeline. Please retry the pipeline sync before sending more outreach.
+              {pipelineSynced === false
+                ? 'The email was sent, but it was not recorded in the pipeline. Please retry the pipeline sync before sending more outreach.'
+                : 'Gmail accepted this email, but pipeline sync could not be confirmed. Check the pipeline separately; do not resend the email.'}
             </div>
           )}
           <div style={{ display: 'flex', gap: 12, justifyContent: 'center' }}>

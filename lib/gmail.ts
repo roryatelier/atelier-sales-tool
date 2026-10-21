@@ -1,3 +1,4 @@
+import { google } from 'googleapis'
 import { buildHtmlEmailRaw } from './email-mime'
 
 const REDIRECT_URI = process.env.PRODUCTION_URL
@@ -29,7 +30,6 @@ export async function refreshGmailToken(refreshToken: string): Promise<string | 
 }
 
 export async function sendViaGmail(accessToken: string, raw: string): Promise<string> {
-  const { google } = await import('googleapis')
   const oauth2 = new google.auth.OAuth2(
     process.env.GMAIL_CLIENT_ID,
     process.env.GMAIL_CLIENT_SECRET,
@@ -38,7 +38,13 @@ export async function sendViaGmail(accessToken: string, raw: string): Promise<st
   oauth2.setCredentials({ access_token: accessToken })
   const gmail = google.gmail({ version: 'v1', auth: oauth2 })
   const result = await gmail.users.messages.send({ userId: 'me', requestBody: { raw } })
-  return result.data.id!
+  const messageId = result.data.id
+  if (typeof messageId !== 'string' || !messageId) {
+    // A send without a message id can never be recorded as accepted; the caller
+    // treats this as an uncertain outcome that needs review, never a resend.
+    throw Object.assign(new Error('Gmail did not return a message id (missing_message_id)'), { code: 'missing_message_id' })
+  }
+  return messageId
 }
 
 export function isGmailAuthError(error: unknown): boolean {

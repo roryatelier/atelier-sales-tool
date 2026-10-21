@@ -173,6 +173,8 @@ Sends the email via the authenticated user's Gmail account.
 **Request:**
 ```json
 {
+  "request_id": "b9ce8719-df35-44e6-8568-95b640bedb14",
+  "expectedGoogleSub": "signed-in-google-subject",
   "to": "jane@brand.com",
   "cc": "optional@cc.com",
   "bcc": "optional@bcc.com",
@@ -187,8 +189,12 @@ Sends the email via the authenticated user's Gmail account.
 
 **Response:**
 ```json
-{ "success": true }
+{ "success": true, "outcome": "accepted", "message_id": "gmail-message-id", "pipeline_synced": true }
 ```
+
+The composer saves one UUID for the confirmed recipient, content, and attachments before sending. Atomic IndexedDB claims share that identity across browser tabs for the same saved draft, independently of draft snapshot writes. Saved confirmation keys are compact SHA-256 fingerprints, including attachment bytes. Retrying that same confirmation reuses the UUID and returns the recorded outcome without sending again. Reusing it with changed content returns `409`. Gmail acceptance requires a message ID; it does not prove inbox delivery. An uncertain outcome instructs the user to check Sent mail and is never automatically resent. Browser storage failure prevents a new send attempt.
+
+An accepted replay may not know whether the original Sheets sync completed. Check the pipeline separately; resending the email is not a sync retry. Closing a draft or clearing browser storage discards its local confirmation history. A newly created draft is a new confirmation.
 
 ---
 

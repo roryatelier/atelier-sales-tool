@@ -13,7 +13,7 @@ test('save a signature, generate, regenerate, and preview the same signature on 
   const root = path.resolve(__dirname, '..')
   const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'atelier-signature-ui-'))
   const tracked = execFileSync('git', ['ls-files', '-z'], { cwd: root }).toString().split('\0').filter(Boolean)
-  const extra = ['lib/email-signature.ts', 'lib/email-signature-store.ts', 'app/api/signature/route.ts']
+  const extra = ['lib/email-signature.ts', 'lib/email-signature-store.ts', 'app/api/signature/route.ts', 'lib/send-confirmation-store.ts']
   for (const relative of [...new Set([...tracked, ...extra])]) {
     if (relative.startsWith('tests/') || relative.startsWith('.env') || relative === 'atelier.db' || relative.includes('service-account')) continue
     const file = path.join(root, relative)
@@ -66,9 +66,28 @@ test('save a signature, generate, regenerate, and preview the same signature on 
     page.on('pageerror', error => errors.push(error.message))
     const sent = []
     const scheduled = []
+    let releaseDelayedSend
+    let markDelayedSendStarted
+    const delayedSendStarted = new Promise(resolve => { markDelayedSendStarted = resolve })
     await page.route('**/api/send-email', async route => {
       sent.push(route.request().postDataJSON())
-      await route.fulfill({ json: { success: true, message_id: 'fixture-message', pipeline_synced: true } })
+      if (sent.length === 1) {
+        await route.fulfill({
+          status: 409,
+          contentType: 'application/json',
+          body: JSON.stringify({ success: false, outcome: 'uncertain', uncertain: true, error: 'This send is in progress or its outcome was not confirmed. Check Sent mail before retrying.' }),
+        })
+        return
+      }
+      if (sent.length === 2) {
+        await route.abort('failed')
+        return
+      }
+      if (sent.length === 4) await new Promise(resolve => {
+        releaseDelayedSend = resolve
+        markDelayedSendStarted()
+      })
+      await route.fulfill({ json: { success: true, outcome: 'accepted', message_id: 'fixture-message', ...(sent.length === 4 ? { replayed: true } : { pipeline_synced: true }) } })
     })
     await page.route('**/api/schedule-email', async route => {
       scheduled.push(route.request().postDataJSON())
@@ -168,12 +187,124 @@ test('save a signature, generate, regenerate, and preview the same signature on 
     assert.match(scheduled[0].body, /Draft \d+/)
 
     await page.getByRole('tab', { name: /Fixture Brand · Fixture/ }).click()
+    await page.locator('input[type="file"]').setInputFiles({ name: 'fixture.txt', mimeType: 'text/plain', buffer: Buffer.alloc(1536 * 1024, 65) })
+    await page.getByText('fixture.txt', { exact: true }).waitFor()
+    const stalePage = await context.newPage()
+    await stalePage.goto('http://localhost:3174/email')
+    await stalePage.locator('textarea').waitFor()
+    const staleSubject = stalePage.locator('label.field-label', { hasText: /^Subject$/ }).locator('..').locator('input')
+    const originalSubject = await staleSubject.inputValue()
+    await page.getByRole('button', { name: 'Send email' }).click()
+    await page.locator('.modal-foot').getByRole('button', { name: 'Confirm send' }).click()
+    await page.getByText('This send is in progress or its outcome was not confirmed. Check Sent mail before retrying.').waitFor()
+    const confirmed = await page.evaluate(() => JSON.parse(localStorage.getItem('atelier:draft:v2:owner-sig:email_tabs')).tabs.find(tab => tab.confirmedRequestId))
+    assert.match(confirmed.confirmedDraftKey, /^[0-9a-f]{64}$/)
+    assert.ok(confirmed.parkedSends.every(send => send.draftKey.length === 64))
+    await staleSubject.fill('Stale browser edit')
+    await staleSubject.fill(originalSubject)
+    await stalePage.waitForFunction(subject => JSON.parse(localStorage.getItem('atelier:draft:v2:owner-sig:email_tabs')).tabs.some(tab => tab.email?.subject === subject && !tab.confirmedRequestId), originalSubject)
+    await stalePage.close()
+    // Reload without any intervening draft edit: the confirmed id must already
+    // be durable, and the exact payload (including attachments) must survive.
+    await page.reload()
+    await page.locator('textarea').waitFor()
+    await page.getByRole('button', { name: 'Send email' }).click()
+    await page.locator('.modal-foot').getByRole('button', { name: 'Confirm send' }).click()
+    await page.getByText('Gmail did not confirm this send. Check Sent mail before trying again.').waitFor()
+    assert.equal(sent[1].request_id, sent[0].request_id, 'reload must replay the original send identity')
+    assert.deepEqual(sent[1].attachments, sent[0].attachments, 'reload must preserve confirmed attachments')
+    const subject = page.locator('label.field-label', { hasText: /^Subject$/ }).locator('..').locator('input')
+    await subject.fill('Changed fixture subject')
+    await page.waitForFunction(() => {
+      const label = [...document.querySelectorAll('label.field-label')].find(node => node.textContent === 'Subject')
+      return label?.parentElement?.querySelector('input')?.value === 'Changed fixture subject'
+    })
     await page.getByRole('button', { name: 'Send email' }).click()
     await page.locator('.modal-foot').getByRole('button', { name: 'Confirm send' }).click()
     await page.getByText('Email sent successfully').waitFor()
-    assert.equal(sent.length, 1)
-    assert.equal(occurrences(sent[0].emailBody, SIGNATURE), 1)
-    assert.match(sent[0].emailBody, new RegExp(`Draft ${currentDraft}`))
+    assert.equal(sent.length, 3)
+    const requestId = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+    assert.match(sent[0].request_id, requestId)
+    assert.equal(sent[1].request_id, sent[0].request_id)
+    assert.match(sent[2].request_id, requestId)
+    assert.notEqual(sent[2].request_id, sent[0].request_id)
+    assert.equal(sent[2].subject, 'Changed fixture subject')
+    for (const payload of sent) {
+      assert.equal(occurrences(payload.emailBody, SIGNATURE), 1)
+      assert.match(payload.emailBody, new RegExp(`Draft ${currentDraft}`))
+    }
+
+    // Storage failure must prevent a provider request, rather than silently
+    // starting a send whose identity cannot survive a reload.
+    await page.getByRole('button', { name: 'New email tab' }).click()
+    await page.locator('textarea').waitFor()
+    const nextSubject = page.locator('label.field-label', { hasText: /^Subject$/ }).locator('..').locator('input')
+    await nextSubject.fill('Delayed fixture subject')
+    await page.evaluate(() => {
+      window.originalIndexedDbOpen = IDBFactory.prototype.open
+      IDBFactory.prototype.open = function() { throw new DOMException('Fixture denied', 'SecurityError') }
+    })
+    await page.getByRole('button', { name: 'Send email' }).click()
+    await page.locator('.modal-foot').getByRole('button', { name: 'Confirm send' }).click()
+    await page.getByText('Could not save this confirmation safely. Free browser storage and try again. This attempt was not sent.').waitFor()
+    assert.equal(sent.length, 3, 'IndexedDB failure must prevent sending')
+    await page.evaluate(() => { IDBFactory.prototype.open = window.originalIndexedDbOpen })
+    await page.evaluate(() => {
+      window.originalStorageSetItem = Storage.prototype.setItem
+      Storage.prototype.setItem = function(key, value) {
+        if (key.endsWith(':email_tabs')) throw new DOMException('Fixture quota', 'QuotaExceededError')
+        return window.originalStorageSetItem.call(this, key, value)
+      }
+    })
+    await page.getByRole('button', { name: 'Send email' }).click()
+    await page.locator('.modal-foot').getByRole('button', { name: 'Confirm send' }).click()
+    await page.getByText('Could not save this confirmation safely. Free browser storage and try again. This attempt was not sent.').waitFor()
+    assert.equal(sent.length, 3)
+    await page.evaluate(() => { Storage.prototype.setItem = window.originalStorageSetItem })
+
+    // Keep A's request pending while switching to B. A's late acceptance must
+    // update A alone, and attachments must not leak into this new draft.
+    await page.getByRole('button', { name: 'Send email' }).click()
+    await page.locator('.modal-foot').getByRole('button', { name: 'Confirm send' }).click()
+    await delayedSendStarted
+    assert.equal(sent[3].attachments, undefined, 'attachments belong to their original draft tab')
+    await page.locator('.modal-foot').getByRole('button', { name: 'Cancel' }).click()
+    await page.getByRole('button', { name: 'New email tab' }).click()
+    await page.locator('textarea').waitFor()
+    await page.locator('label.field-label', { hasText: /^Subject$/ }).locator('..').locator('input').fill('Unsent fixture subject')
+    releaseDelayedSend()
+    await page.waitForFunction(() => JSON.parse(localStorage.getItem('atelier:draft:v2:owner-sig:email_tabs')).tabs.some(tab => tab.email?.subject === 'Delayed fixture subject' && tab.sent))
+    assert.equal(await page.getByText('Email sent successfully').count(), 0, 'B must not inherit A acceptance')
+    const persisted = await page.evaluate(() => JSON.parse(localStorage.getItem('atelier:draft:v2:owner-sig:email_tabs')))
+    const sentTab = persisted.tabs.find(tab => tab.email?.subject === 'Delayed fixture subject')
+    assert.ok(sentTab)
+    await page.getByRole('tab').nth(persisted.tabs.findIndex(tab => tab.id === sentTab.id)).click()
+    await page.getByText('Email sent successfully').waitFor()
+    await page.getByText('Gmail accepted this email, but pipeline sync could not be confirmed. Check the pipeline separately; do not resend the email.').waitFor()
+    await page.reload()
+    await page.getByText('Email sent successfully').waitFor()
+
+    // Exercise the real shared store from two independent documents. Claims
+    // serialize, and an outdated refusal must not delete a newer identity.
+    const storeSource = require('typescript').transpileModule(fs.readFileSync(path.join(root, 'lib/send-confirmation-store.ts'), 'utf8'), { compilerOptions: { module: require('typescript').ModuleKind.CommonJS, target: require('typescript').ScriptTarget.ES2020 } }).outputText
+    const otherDocument = await context.newPage()
+    await otherDocument.goto('http://localhost:3174/email')
+    for (const document of [page, otherDocument]) await document.evaluate(source => {
+      const exported = {}
+      new Function('exports', source)(exported)
+      window.storeForTest = exported
+    }, storeSource)
+    const identity = ['fixture-concurrency-owner', 'shared-tab', 'a'.repeat(64)]
+    const ids = await Promise.all([
+      page.evaluate(args => window.storeForTest.claimStoredSendId(...args, '11111111-1111-4111-8111-111111111111'), identity),
+      otherDocument.evaluate(args => window.storeForTest.claimStoredSendId(...args, '22222222-2222-4222-8222-222222222222'), identity),
+    ])
+    assert.equal(ids[0], ids[1], 'concurrent documents must share one identity')
+    await otherDocument.evaluate(args => window.storeForTest.forgetStoredSendId(...args, '33333333-3333-4333-8333-333333333333'), identity)
+    assert.equal(await page.evaluate(args => window.storeForTest.claimStoredSendId(...args, '44444444-4444-4444-8444-444444444444'), identity), ids[0])
+    await page.evaluate(args => window.storeForTest.forgetStoredSendId(...args), [...identity, ids[0]])
+    assert.equal(await page.evaluate(args => window.storeForTest.claimStoredSendId(...args, '44444444-4444-4444-8444-444444444444'), identity), '44444444-4444-4444-8444-444444444444')
+    await otherDocument.close()
     assert.deepEqual(errors, [])
   } finally {
     if (browser) await browser.close()
