@@ -88,9 +88,11 @@ response behavior or Neon transport. The live checks above remain required.
 
 ## Rollback
 
-Revert the application squash commit, preserving the new columns, outbox and
-triggers. Old code does not set new snapshots, so new old-code sends will not
-create export events. An older worker cannot drain the remaining outbox. Do not
-blindly reset uncertain writes to pending or restore the old untracked append
-path for those records: reconcile outstanding IDs first. No existing data or
-quarantined send should be deleted or automatically activated during rollback.
+Pause immediate and scheduled sending before reverting the application squash
+commit. Preserve the new columns, outbox and triggers. Old code does not create
+new snapshots or drain the outbox, but pre-existing frozen source records can
+still enqueue events while an older worker also performs its untracked append.
+Review outstanding events AND frozen pending source records before resuming that
+older path. Reconcile Sheets/provider evidence first; do not blindly reset
+uncertain writes to pending. No existing data or quarantined send should be
+deleted or automatically activated during rollback.
