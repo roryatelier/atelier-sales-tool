@@ -176,9 +176,29 @@ Reveal, select, and draft keep the chosen address, manual To edits win over a la
 
 ### Sheets pipeline
 
-Appends go through `lib/sheets.ts` (`Sheet1!A:Q`, including a sender column). Status updates still change the first row whose brand name matches, on column O. Notes and status for a second contact at the same brand can hit the wrong row. Scheduled sends log a Sheets failure and still leave the job `sent`. There is no outreach id, outbox, or sync status.
+Outbox patch prepared for review (21 October 2026):
 
-The October review saw the live pipeline read fail. This reconciliation did not call production. Treat a current 500 as something to diagnose from sanitized provider errors (credential, spreadsheet id, sharing, tab name, quota), not as a known single cause.
+- New accepted sends atomically enqueue an owner-scoped export with a frozen
+  pipeline snapshot. Both immediate and scheduled acceptance writes use database
+  triggers. Repeated acceptance does not create another event; legacy rows are
+  not backfilled or reclassified.
+- Exports have globally unique, stable outreach IDs. A confirmed write creates a new Sheet1 row
+  and its developer metadata in one batch; subsequent status/notes edits target
+  that metadata instead of a remembered row position.
+- Pre-write failures can retry. A possibly committed write only reconciles by ID;
+  an absent ID does not authorize another append. Export workers never call Gmail.
+- The pipeline page shows pending/failed/uncertain exports and owner-bound retry
+  controls independently of the pipeline read. The existing cron services one
+  queued export per run; newly accepted sends also attempt their own export.
+- Setup, rollback, data boundaries and live acceptance checks are documented in
+  `doc/SHEETS_EXPORTS.md`. Sheet1 R:S must be explicitly reserved before export.
+
+Sheets remains the pipeline read source. This is not a migration of existing
+Sheets history into a canonical database pipeline. Legacy brand-only edits are
+allowed only for one unambiguous row and retain the old positional-write limit:
+operators must avoid sorting/inserting/deleting during these edits. Legacy
+metadata migration, contact-history repair after crashes, a dedicated export
+worker and a rehearsed canonical-ledger cutover remain open.
 
 ## Open
 

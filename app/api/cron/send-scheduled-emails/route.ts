@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { initialiseDb, isVercel, getLocalDb } from '@/lib/db'
 import { openGmailCredentials, isAuthorizedEmail } from '@/lib/auth-policy'
 import { makeEmailRaw, refreshScheduledGmailToken, sendViaGmail } from '@/lib/gmail'
-import { appendPipelineRow } from '@/lib/sheets'
+import { pipelineSnapshot, preparePipelineExport, syncPipelineSource, processPipelineExports } from '@/lib/outreach-outbox'
 
 import { claimNext, recoverScheduledEmails, beginScheduledSend, failScheduledSend, acceptScheduledSend, type ScheduledEmail } from '@/lib/scheduled-email-store'
 
@@ -18,41 +18,19 @@ async function recordHistory(email: ScheduledEmail) {
   } catch { console.error('Scheduled contact history sync failed') }
 }
 
-async function syncPipeline(email: ScheduledEmail) {
-  if (!email.brand_name) return
-  try {
-    const dossier = email.dossier_json ? JSON.parse(email.dossier_json) : {}
-    await appendPipelineRow({
-      brand_name: email.brand_name,
-      website: dossier.website,
-      lead_source: 'Scheduled',
-      revenue_estimate: dossier.revenue_estimate,
-      retailers: dossier.retailers,
-      category: dossier.category,
-      icp_score: dossier.icp_score,
-      score_band: dossier.score_band,
-      signals: dossier.signals,
-      target_role: dossier.target_role,
-      contact_name: email.contact_name,
-      email_subject: email.subject,
-      email_body: email.body,
-      status: 'Sent',
-      sent_by: email.owner_email,
-    })
-  } catch { console.error('Scheduled pipeline sync failed') }
-}
-
 export async function GET(request: NextRequest) {
   const secret = process.env.CRON_SECRET
   if (!secret || request.headers.get('authorization') !== `Bearer ${secret}`) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-  if (!process.env.GMAIL_CLIENT_ID || !process.env.GMAIL_CLIENT_SECRET) return NextResponse.json({ error: 'Gmail configuration unavailable' }, { status: 503 })
   try { await initialiseDb() } catch { return NextResponse.json({ error: 'Database unavailable' }, { status: 503 }) }
 
   const recovery = await recoverScheduledEmails()
+  const deadline = Date.now() + 60_000
+  try { await processPipelineExports(1) } catch { console.error('Pipeline export worker unavailable') }
+  if (!process.env.GMAIL_CLIENT_ID || !process.env.GMAIL_CLIENT_SECRET) return NextResponse.json({ error: 'Gmail configuration unavailable' }, { status: 503 })
   let sent = 0
   let needsReview = recovery.needs_review
   let needsReauth = 0
-  for (let processed = 0; processed < 20; processed++) {
+  for (let processed = 0; processed < 20 && Date.now() < deadline; processed++) {
     const email = await claimNext()
     if (!email) break
     const owner = { googleSub: email.owner_google_sub, email: email.owner_email }
@@ -68,6 +46,7 @@ export async function GET(request: NextRequest) {
       if (refresh.reauth) needsReauth++
       continue
     }
+    let sendStarted = false
     try {
       const raw = makeEmailRaw(email.to_email, email.subject, email.body, email.cc || undefined, email.bcc || undefined)
       if (!isAuthorizedEmail(email.owner_email)) {
@@ -75,14 +54,24 @@ export async function GET(request: NextRequest) {
         needsReauth++
         continue
       }
+      await preparePipelineExport('scheduled', email.id, email.owner_google_sub, pipelineSnapshot({
+        ...(email.dossier_json ? JSON.parse(email.dossier_json) : {}), brand_name: email.brand_name,
+        to_email: email.to_email, lead_source: 'Scheduled', contact_name: email.contact_name,
+        email_subject: email.subject, email_body: email.body, sent_by: email.owner_email,
+      }))
       if (!await beginScheduledSend(email)) continue
+      sendStarted = true
       const messageId = await sendViaGmail(refresh.accessToken, raw)
       if (!messageId) throw new Error('missing_message_id')
       await acceptScheduledSend(email, messageId)
       sent++
       await recordHistory(email)
-      await syncPipeline(email)
+      try { await syncPipelineSource(`scheduled:${email.id}`, email.owner_google_sub) } catch { console.error('Scheduled pipeline export pending') }
     } catch {
+      if (!sendStarted) {
+        await failScheduledSend(email, 'pending', 'preparation_failed')
+        continue
+      }
       // A failed Gmail request can be ambiguous. Never retry it automatically.
       await failScheduledSend(email, 'needs_review', 'gmail_send_ambiguous')
       needsReview++

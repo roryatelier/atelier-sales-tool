@@ -1,11 +1,15 @@
 'use client'
 
+import PipelineSyncStatus from '../components/PipelineSyncStatus'
 import { userStorage } from '@/lib/browser-storage'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
 
 interface Lead {
+  outreach_id?: string
+  pipeline_key: string
+  contact_email?: string
   brand_name: string
   website: string
   lead_source: string
@@ -28,6 +32,8 @@ export default function PipelinePage() {
   const [leads, setLeads] = useState<Lead[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  const [actionError, setActionError] = useState('')
+  const fetchVersion = useRef({value:0})
   const [updatingStatus, setUpdatingStatus] = useState<string | null>(null)
   const [filterStatus, setFilterStatus] = useState<string>('All')
   const [filterBand, setFilterBand] = useState<string>('All')
@@ -63,59 +69,60 @@ export default function PipelinePage() {
   useEffect(() => {
     document.title = 'Pipeline — Atelier'
     async function fetchLeads() {
+      const version = ++fetchVersion.current.value
       try {
         const res = await fetch('/api/pipeline')
         const data = await res.json()
-        if (data.success) {
+        if (version !== fetchVersion.current.value) return
+        if (res.ok && data.success) {
+          setError('')
           setLeads(data.leads)
           setSheetUrl(data.sheet_url ?? null)
         } else {
           setError('Failed to load pipeline.')
         }
       } catch {
-        setError('Failed to load pipeline.')
+        if (version === fetchVersion.current.value) setError('Failed to load pipeline.')
       } finally {
-        setLoading(false)
+        if (version === fetchVersion.current.value) setLoading(false)
       }
     }
+    const epoch = fetchVersion.current
     fetchLeads()
+    window.addEventListener('pipeline-sync-complete', fetchLeads)
+    return () => { epoch.value++; window.removeEventListener('pipeline-sync-complete', fetchLeads) }
   }, [])
 
-  async function updateStatus(brandName: string, newStatus: string) {
-    setUpdatingStatus(brandName)
+  async function updateStatus(lead: Lead, newStatus: string) {
+    fetchVersion.current.value++
+    setActionError('')
+    setUpdatingStatus(lead.pipeline_key)
     try {
-      setLeads(prev => prev.map(l =>
-        l.brand_name === brandName ? { ...l, status: newStatus } : l
-      ))
-      await fetch('/api/update-pipeline', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ brand_name: brandName, status: newStatus })
+      const response = await fetch('/api/update-pipeline', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ brand_name: lead.brand_name, outreach_id: lead.outreach_id || undefined, status: newStatus }),
       })
-    } catch {
-      console.error('Failed to update status')
-    } finally {
-      setUpdatingStatus(null)
-    }
+      const data = await response.json()
+      if (!response.ok || !data.success) throw new Error(data.error || 'Status update failed')
+      setLeads(prev => prev.map(row => (lead.outreach_id ? row.outreach_id === lead.outreach_id : JSON.stringify(row) === JSON.stringify(lead)) ? { ...row, status: newStatus } : row))
+    } catch (failure) { setActionError(failure instanceof Error ? failure.message : 'Status update failed') }
+    finally { setUpdatingStatus(null) }
   }
-
-  async function saveNotes(brandName: string) {
+  async function saveNotes(lead: Lead) {
+    fetchVersion.current.value++
+    setActionError('')
     setSavingNotes(true)
     try {
-      await fetch('/api/update-notes', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ brand_name: brandName, notes: notesValue })
+      const response = await fetch('/api/update-notes', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ brand_name: lead.brand_name, outreach_id: lead.outreach_id || undefined, notes: notesValue }),
       })
-      setLeads(prev => prev.map(l =>
-        l.brand_name === brandName ? { ...l, notes: notesValue } : l
-      ))
+      const data = await response.json()
+      if (!response.ok || !data.success) throw new Error(data.error || 'Note update failed')
+      setLeads(prev => prev.map(row => (lead.outreach_id ? row.outreach_id === lead.outreach_id : JSON.stringify(row) === JSON.stringify(lead)) ? { ...row, notes: notesValue } : row))
       setEditingNotes(null)
-    } catch {
-      console.error('Failed to save notes')
-    } finally {
-      setSavingNotes(false)
-    }
+    } catch (failure) { setActionError(failure instanceof Error ? failure.message : 'Note update failed') }
+    finally { setSavingNotes(false) }
   }
 
   function filterByDate(dateStr: string): boolean {
@@ -198,6 +205,9 @@ export default function PipelinePage() {
         </div>
       </div>
       <p className="page-sub" style={{ marginBottom: 20 }}>All leads tracked across outbound, inbound, and referral channels.</p>
+
+      <PipelineSyncStatus />
+      {actionError && <p role="alert">{actionError}</p>}
 
       {!loading && leads.length > 0 && (
         <div style={{ display: 'flex', gap: 16, marginBottom: 28, flexWrap: 'wrap' }}>
@@ -313,7 +323,7 @@ export default function PipelinePage() {
                 return sortByScore === 'desc' ? bScore - aScore : aScore - bScore
               }).map((lead, i) => (
                 <tr
-                  key={i}
+                  key={lead.pipeline_key ?? i}
                   className="clickable"
                   onClick={() => {
                     userStorage.setItem('pipeline_lead', JSON.stringify(lead))
@@ -350,8 +360,8 @@ export default function PipelinePage() {
                     <td onClick={e => e.stopPropagation()}>
                       <select
                       value={lead.status}
-                      onChange={e => updateStatus(lead.brand_name, e.target.value)}
-                      disabled={updatingStatus === lead.brand_name}
+                      onChange={e => updateStatus(lead, e.target.value)}
+                      disabled={updatingStatus === lead.pipeline_key}
                       style={{
                         border: 'none', background: 'transparent', fontSize: 13,
                         color: 'var(--text-default)', cursor: 'pointer', outline: 'none',
@@ -365,17 +375,17 @@ export default function PipelinePage() {
                   </td>
                   <td style={{ color: 'var(--slate-500)', fontSize: 13 }}>{lead.date_added}</td>
                   <td onClick={e => e.stopPropagation()} style={{ minWidth: 180 }}>
-                    {editingNotes === lead.brand_name ? (
+                    {editingNotes === lead.pipeline_key ? (
                       <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
                         <input
                           type="text"
                           value={notesValue}
                           onChange={e => setNotesValue(e.target.value)}
-                          onKeyDown={e => { if (e.key === 'Enter') saveNotes(lead.brand_name); if (e.key === 'Escape') setEditingNotes(null) }}
+                          onKeyDown={e => { if (e.key === 'Enter') saveNotes(lead); if (e.key === 'Escape') setEditingNotes(null) }}
                           autoFocus
                           style={{ fontSize: 12, padding: '3px 8px', border: '1px solid var(--black-100)', borderRadius: 4, outline: 'none', flex: 1 }}
                         />
-                        <button onClick={() => saveNotes(lead.brand_name)} disabled={savingNotes} className="btn btn-primary btn-sm" style={{ padding: '3px 8px', fontSize: 11 }}>
+                        <button onClick={() => saveNotes(lead)} disabled={savingNotes} className="btn btn-primary btn-sm" style={{ padding: '3px 8px', fontSize: 11 }}>
                           {savingNotes ? '...' : 'Save'}
                         </button>
                         <button onClick={() => setEditingNotes(null)} className="btn btn-secondary btn-sm" style={{ padding: '3px 8px', fontSize: 11 }}>
@@ -384,7 +394,7 @@ export default function PipelinePage() {
                       </div>
                     ) : (
                       <div
-                        onClick={() => { setEditingNotes(lead.brand_name); setNotesValue(lead.notes ?? '') }}
+                        onClick={() => { setEditingNotes(lead.pipeline_key); setNotesValue(lead.notes ?? '') }}
                         style={{ fontSize: 12, color: lead.notes ? 'var(--text-default)' : 'var(--slate-300)', cursor: 'pointer', padding: '2px 4px', borderRadius: 4 }}
                       >
                         {lead.notes || '+ Add note'}
@@ -412,6 +422,7 @@ export default function PipelinePage() {
                               if (data.success) {
                                 userStorage.setItem('current_dossier', JSON.stringify(data.dossier))
                                 userStorage.setItem('follow_up_context', JSON.stringify({
+                                  outreach_id: lead.outreach_id,
                                   original_subject: lead.email_subject,
                                   contact_name: lead.contact_name,
                                   date_sent: lead.date_added

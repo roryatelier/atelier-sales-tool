@@ -24,6 +24,7 @@ function fixture() {
       if (name === '@/lib/db') return { initialiseDb: async () => {}, isVercel: false, getLocalDb: () => new Proxy(db, { get: (target, prop) => prop === 'close' ? () => {} : typeof target[prop] === 'function' ? target[prop].bind(target) : target[prop] }) }
       if (name === '@/lib/auth-policy') return { sealGmailCredentials: async () => 'fresh-synthetic', openGmailCredentials: async () => ({ refreshToken: 'synthetic' }), isAuthorizedEmail: () => true }
       if (name === '@/lib/gmail') return { makeEmailRaw: () => 'synthetic', refreshGmailToken: async () => 'synthetic', refreshScheduledGmailToken: async () => behavior.refresh, sendViaGmail: async () => { calls++; if (behavior.onSend) await behavior.onSend(); if (behavior.sendError) throw behavior.sendError; return 'synthetic-message' } }
+      if (name === '@/lib/outreach-outbox') return { pipelineSnapshot: JSON.stringify, preparePipelineExport: async () => { if (behavior.prepareError) throw new Error('synthetic preparation failure') }, syncPipelineSource: async () => 'synced', processPipelineExports: async () => {} }
       if (name === '@/lib/sheets') return { appendPipelineRow: async () => {} }
       if (name.startsWith('@/')) return load(name.slice(2) + '.ts')
       return require(name)
@@ -154,4 +155,12 @@ test('schedule API binds cancellation and resume to the confirmed account and cu
     const rows = await (await route.GET(new NextRequest('https://example.invalid/api/schedule-email'))).json()
     assert.equal(rows.owner_google_sub, 'owner'); assert.equal(rows.emails.length, 0)
   } finally { f.db.close() }
+})
+
+test('pipeline preparation failures back off before any Gmail send',async()=>{
+ const f=fixture();try{
+  f.seed('pending');f.behavior.prepareError=true;await f.run()
+  const row=f.db.prepare('SELECT * FROM scheduled_emails').get()
+  assert.equal(row.delivery_status,'pending');assert.equal(row.last_error_code,'preparation_failed');assert.equal(row.attempt_count,1);assert.equal(f.calls(),0)
+ }finally{f.db.close()}
 })

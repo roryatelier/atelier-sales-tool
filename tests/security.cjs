@@ -39,7 +39,10 @@ const google = {
   auth: { OAuth2: MockOAuth, GoogleAuth: MockGoogleAuth },
   oauth2: () => ({ userinfo: { get: async () => ({ data: userData }) } }),
   gmail: () => ({ users: { messages: { send: async () => { providerCalls++; gmailSendCalls++; const error = gmailSendErrors.shift(); if (error) throw error; if (gmailSendGate) await gmailSendGate; if (gmailSendDelay) await new Promise(resolve => setTimeout(resolve, gmailSendDelay)); return { data: { id: gmailSendReturnId } }; } } } }),
-  sheets: () => ({ spreadsheets: { values: { append: async () => { if (sheetsShouldFail) throw new Error('Sheets unavailable'); } } } }),
+  sheets: () => ({ spreadsheets: { get: async () => ({data:{sheets:[{properties:{title:'Sheet1',sheetId:0}}]}}), batchUpdate: async () => {if(sheetsShouldFail) throw new Error('Sheets unavailable'); return {data:{replies:[{},{},{},{createDeveloperMetadata:{developerMetadata:{metadataId:1}}}]}}}, values: {
+    get: async options => { if (sheetsShouldFail) throw new Error('Sheets unavailable'); return {data:{values:[options.range==='Sheet1!R:S'?['Outreach ID','Recipient Email']:[...Array(17).fill(''),'Outreach ID','Recipient Email']]}} },
+    append: async () => { if (sheetsShouldFail) throw new Error('Sheets unavailable'); return {data:{updates:{updatedRange:'Sheet1!A2:S2'}}} },
+  } } }),
 };
 const dbMock = {
   isVercel: false,
@@ -66,7 +69,7 @@ function load(relative) {
       if (name === 'path') return require('path');
       if (name === 'node:crypto') return require('node:crypto');
       if (name === '@vercel/postgres') return {
-        sql: async (strings, ...values) => {
+        sql: Object.assign(async (strings, ...values) => {
           providerCalls++;
           const failure = pgFailureQueue.shift();
           if (failure) throw failure;
@@ -101,12 +104,13 @@ function load(relative) {
             if (failOutcomeWrites > 0) { failOutcomeWrites -= 1; throw new Error('outcome write failed'); }
             if (values[0] === 'accepted' && failAcceptedWrites > 0) {
               failAcceptedWrites -= 1;
-              if (commitAcceptedBeforeFailure) { record.status = 'accepted'; record.messageId = values[1]; record.errorCode = null; }
+              if (commitAcceptedBeforeFailure) { record.status = 'accepted'; record.messageId = values[1]; record.errorCode = null; if(record.pipelinePayload) pgExports.set(`immediate:${record.id}`,{outreach_id:`immediate:${record.id}`,owner_google_sub:record.owner,payload:record.pipelinePayload,status:'pending',destination_id:'',write_intent_at:null,accepted_at:new Date().toISOString()}); }
               throw new Error('accepted write failed');
             }
             record.status = values[0];
             record.messageId = values[1];
             record.errorCode = values[2];
+            if (record.status === 'accepted' && record.pipelinePayload) pgExports.set(`immediate:${record.id}`, { outreach_id:`immediate:${record.id}`,owner_google_sub:record.owner,payload:record.pipelinePayload,status:'pending',destination_id:'',write_intent_at:null,accepted_at:new Date().toISOString() });
             return { rows: [{ id: record.id }], rowCount: 1 };
           }
           if (text.includes('FROM send_records')) {
@@ -116,7 +120,7 @@ function load(relative) {
             return { rows: [{ id: record.id, status: record.status, gmail_message_id: record.messageId, last_error_code: record.errorCode, payload_hash: record.hash, owner_google_sub: record.owner }], rowCount: 1 };
           }
           throw new Error('Unrecognised send_records SQL in the Postgres mock');
-        },
+        }, { query: pgOutboxQuery }),
       };
       if (name === '@/lib/db') return dbMock;
       if (name.startsWith('@/')) return load(name.slice(2) + '.ts');
@@ -413,7 +417,22 @@ test('direct sends return safe actionable Gmail failures and only retry explicit
 });
 
 function sendRecordsSchema() {
-  return load('lib/db.ts').SEND_RECORDS_SQLITE_DDL;
+  return load('lib/db.ts').SEND_RECORDS_SQLITE_DDL + ';' + load('lib/db.ts').OUTREACH_EXPORTS_SQLITE_DDL;
+}
+const pgExports = new Map();
+async function pgOutboxQuery(text, values) {
+  if (text.includes('UPDATE send_records SET pipeline_payload')) {
+    const row=pgFind(values[1],values[2]); if(!row || row.status!=='sending') return {rows:[]}; row.pipelinePayload ??= values[0]; return {rows:[{id:row.id}]};
+  }
+  if(text.startsWith('SELECT outreach_id') && text.includes('source_key')){const row=pgExports.get(values[0]);return {rows:row && row.owner_google_sub===values[1]?[{outreach_id:row.outreach_id}]:[]};}
+  const id=text.startsWith('SELECT status')?values[0]:text.includes("SET status = 'claimed'")?values[2]:text.includes('SET destination_id')?values[1]:text.includes("SET status = 'writing'")?values[1]:values[5];
+  const row=pgExports.get(id); if(!row) return {rows:[]};
+  if(text.startsWith('SELECT status')) return {rows:row.owner_google_sub===values[1]?[{status:row.status}]:[]};
+  if(text.includes("SET status = 'claimed'")) { if(row.owner_google_sub!==values[3] || !['pending','failed','needs_review'].includes(row.status)) return {rows:[]}; row.status='claimed';row.claim_token=values[0];return {rows:[{...row}]}; }
+  if(text.includes('SET destination_id')) { row.destination_id=values[0];return {rows:[{outreach_id:id}]}; }
+  if(text.includes("SET status = 'writing'")) {row.status='writing';row.write_intent_at=values[0];return {rows:[{outreach_id:id}]};}
+  if(text.includes('SET status = $1')) { row.status=values[0];return {rows:[{outreach_id:id}]}; }
+  throw new Error('Unrecognized outbox query');
 }
 const pgStore = new Map();
 let pgNextId = 1;
@@ -422,7 +441,7 @@ function pgFind(id, owner) {
   return null;
 }
 function resetPgStore() {
-  pgStore.clear();
+  pgStore.clear(); pgExports.clear();
   pgNextId = 1;
   pgFailureQueue = [];
   failAcceptedWrites = 0;
