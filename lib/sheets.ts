@@ -127,23 +127,26 @@ export async function appendOutreachRow(body: Record<string, unknown>, id: strin
   const sheets = outreachSheets(destination)
   const retailers = Array.isArray(body.retailers) ? body.retailers.map(r => typeof r === 'object' && r ? String(r.name ?? '') : String(r)).join(', ') : body.retailers
   const signals = Array.isArray(body.signals) ? body.signals.slice(0,3).map(s => typeof s === 'object' && s ? String(s.type ?? '').replace(/_/g,' ') : String(s)).join(', ') : body.signals
+  const acceptedInstant = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(acceptedAt) ? acceptedAt.replace(' ', 'T') + 'Z' : acceptedAt
   const row = [body.brand_name || body.to_email,body.website,body.lead_source,body.revenue_estimate,retailers,body.category,body.icp_score,body.score_band,signals,body.target_role,body.contact_name,body.email_subject,body.email_body,
-    new Date(acceptedAt).toLocaleDateString('en-AU', { timeZone: 'Australia/Sydney' }),'Sent','',body.sent_by,id,body.to_email].map(value => value ?? '')
+    new Date(acceptedInstant).toLocaleDateString('en-AU', { timeZone: 'Australia/Sydney' }),'Sent','',body.sent_by,id,body.to_email].map(value => value ?? '')
   const properties = await sheets.spreadsheets.get({ spreadsheetId: destination, fields: 'sheets.properties' }, { timeout: 10_000, retry: false })
   const sheet = properties.data.sheets?.find(sheet => sheet.properties?.title === 'Sheet1')?.properties
-  if (typeof sheet?.sheetId !== 'number') throw new Error('Sheet1 missing')
+  if (typeof sheet?.sheetId !== 'number' || typeof sheet.gridProperties?.rowCount !== 'number') throw new Error('Sheet1 missing')
   const current = await sheets.spreadsheets.values.get({ spreadsheetId: destination, range: 'Sheet1!A:S' }, { timeout: 10_000, retry: false })
   if (current.data.values?.[0]?.[17] !== 'Outreach ID' || current.data.values?.[0]?.[18] !== 'Recipient Email') throw new Error('sheets_export_headers_required')
   const index = Math.max(current.data.values?.length ?? 1, 1)
   // Insert a NEW row rather than overwrite a previously empty coordinate. All
   // requests below commit atomically, including metadata that follows row moves.
-  if (!await beforeWrite()) return null
-  const result = await sheets.spreadsheets.batchUpdate({ spreadsheetId: destination, requestBody: { requests: [
-    { appendDimension: { sheetId: sheet.sheetId, dimension: 'ROWS', length: 1 } },
+  const requests: import('googleapis').sheets_v4.Schema$Request[] = []
+  if (index >= sheet.gridProperties.rowCount) requests.push({ appendDimension: { sheetId: sheet.sheetId, dimension: 'ROWS', length: 1 } })
+  requests.push(
     { insertDimension: { range: { sheetId: sheet.sheetId, dimension: 'ROWS', startIndex: index, endIndex: index + 1 }, inheritFromBefore: index > 1 } },
     { updateCells: { start: { sheetId: sheet.sheetId, rowIndex: index, columnIndex: 0 }, rows: [{ values: row.map(value => ({ userEnteredValue: { stringValue: String(value) } })) }], fields: 'userEnteredValue' } },
     { createDeveloperMetadata: { developerMetadata: { metadataKey: 'atelier_outreach_id', metadataValue: id, visibility: 'DOCUMENT', location: { dimensionRange: { sheetId: sheet.sheetId, dimension: 'ROWS', startIndex: index, endIndex: index + 1 } } } } },
-  ] } }, { timeout: 10_000, retry: false })
-  if (typeof result.data.replies?.[3]?.createDeveloperMetadata?.developerMetadata?.metadataId !== 'number') throw new Error('append_unconfirmed')
+  )
+  if (!await beforeWrite()) return null
+  const result = await sheets.spreadsheets.batchUpdate({ spreadsheetId: destination, requestBody: { requests } }, { timeout: 10_000, retry: false })
+  if (typeof result.data.replies?.[requests.length-1]?.createDeveloperMetadata?.developerMetadata?.metadataId !== 'number') throw new Error('append_unconfirmed')
   return `Sheet1!A${index+1}:S${index+1}`
 }

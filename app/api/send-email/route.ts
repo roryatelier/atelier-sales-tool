@@ -1,6 +1,6 @@
 import { getGmailCredentials } from '@/lib/session'
 import { sealGmailCredentials } from '@/lib/auth-policy'
-import { pipelineSnapshot, preparePipelineExport, syncPipelineSource, sourceExportStatus } from '@/lib/outreach-outbox'
+import { pipelineSnapshot, syncPipelineSource, sourceExportStatus } from '@/lib/outreach-outbox'
 import { authorizeRequest } from '@/lib/api-auth'
 import { NextRequest, NextResponse } from 'next/server'
 import { classifyGmailError, sendViaGmail, type GmailErrorKind } from '@/lib/gmail'
@@ -209,6 +209,13 @@ export async function POST(request: NextRequest) {
       to, cc: cc ?? '', bcc: bcc ?? '', subject, emailBody, attachments: attachments ?? [],
     }))
 
+    // Freeze export data in the initial record, before acquiring any send claim.
+    // A database outage here can never strand an unattempted message as sending.
+    const pipelinePayload = body.dossier ? pipelineSnapshot({
+      ...body.dossier, to_email: to, lead_source: leadSource ?? 'Outbound', target_role: body.role ?? '',
+      contact_name: contactName ?? '', email_subject: subject, email_body: emailBody, sent_by: session.email,
+    }) : null
+
     const { isVercel, initialiseDb, getLocalDb } = await import('@/lib/db')
     try {
       await initialiseDb()
@@ -405,8 +412,8 @@ export async function POST(request: NextRequest) {
       if (isVercel) {
         const { sql } = await import('@vercel/postgres')
         const inserted = await sql`
-          INSERT INTO send_records (owner_google_sub, owner_email, request_id, payload_hash, status)
-          VALUES (${session.googleSub}, ${session.email}, ${requestId}, ${payloadHash}, 'recorded')
+          INSERT INTO send_records (owner_google_sub, owner_email, request_id, payload_hash, status, pipeline_payload)
+          VALUES (${session.googleSub}, ${session.email}, ${requestId}, ${payloadHash}, 'recorded', ${pipelinePayload})
           ON CONFLICT (request_id) DO NOTHING
           RETURNING id`
         follow = (inserted.rowCount ?? inserted.rows.length) === 0
@@ -415,8 +422,8 @@ export async function POST(request: NextRequest) {
       } else {
         const db = getLocalDb()
         try {
-          const inserted = db.prepare(`INSERT INTO send_records (owner_google_sub, owner_email, request_id, payload_hash, status)
-            VALUES (?, ?, ?, ?, 'recorded')`).run(session.googleSub, session.email, requestId, payloadHash)
+          const inserted = db.prepare(`INSERT INTO send_records (owner_google_sub, owner_email, request_id, payload_hash, status, pipeline_payload)
+            VALUES (?, ?, ?, ?, 'recorded', ?)`).run(session.googleSub, session.email, requestId, payloadHash, pipelinePayload)
           follow = await claimNewRow(Number(inserted.lastInsertRowid))
         } catch (insertError) {
           if (!isUniqueViolation(insertError)) throw insertError
@@ -438,19 +445,6 @@ export async function POST(request: NextRequest) {
         logSafeError('Send claim release failed before Gmail', error)
       }
       return NextResponse.json({ error: 'Send record unavailable. Refresh and confirm the send again.' }, { status: 503 })
-    }
-
-    if (body.dossier) {
-      try {
-        await preparePipelineExport('immediate', recordId, session.googleSub, pipelineSnapshot({
-          ...body.dossier, to_email: to, lead_source: leadSource ?? 'Outbound', target_role: body.role ?? '',
-          contact_name: contactName ?? '', email_subject: subject, email_body: emailBody, sent_by: session.email,
-        }))
-      } catch (error) {
-        logSafeError('Pipeline snapshot failed before Gmail', error)
-        await releaseClaim(recordId)
-        return NextResponse.json({ error: 'Could not prepare the pipeline record. Try again later.' }, { status: 503 })
-      }
     }
 
     const raw = buildHtmlEmailRaw(to, subject, emailBody, cc, bcc, attachments)

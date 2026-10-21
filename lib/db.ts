@@ -36,7 +36,7 @@ CREATE TABLE IF NOT EXISTS outreach_exports (
   sheet_range TEXT, accepted_at TEXT NOT NULL, synced_at TEXT
 );
 CREATE TRIGGER IF NOT EXISTS enqueue_immediate_export AFTER UPDATE OF status ON send_records
-WHEN NEW.status = 'accepted' AND NEW.gmail_message_id IS NOT NULL AND length(trim(NEW.gmail_message_id)) > 0 AND NEW.pipeline_payload IS NOT NULL
+WHEN NEW.status IN ('accepted','needs_review') AND NEW.gmail_message_id IS NOT NULL AND length(trim(NEW.gmail_message_id)) > 0 AND NEW.pipeline_payload IS NOT NULL
 BEGIN
   INSERT INTO outreach_exports(source_key,owner_google_sub,payload,gmail_message_id,accepted_at)
     VALUES ('immediate:' || NEW.id,NEW.owner_google_sub,NEW.pipeline_payload,NEW.gmail_message_id,COALESCE(NEW.accepted_at,datetime('now')))
@@ -153,12 +153,12 @@ export async function initialiseDb() {
     // function on every request races concurrent initializations in Postgres.
     await sql`DO $migration$ BEGIN
       PERFORM pg_advisory_xact_lock(742091631);
-      IF to_regprocedure('public.enqueue_outreach_export_v1()') IS NULL THEN
-        EXECUTE $function$ CREATE FUNCTION public.enqueue_outreach_export_v1() RETURNS trigger AS $body$
+      IF to_regprocedure('public.enqueue_outreach_export_v2()') IS NULL THEN
+        EXECUTE $function$ CREATE FUNCTION public.enqueue_outreach_export_v2() RETURNS trigger AS $body$
     BEGIN
       IF NEW.pipeline_payload IS NOT NULL AND NEW.gmail_message_id IS NOT NULL AND length(trim(NEW.gmail_message_id)) > 0 THEN
         IF TG_TABLE_NAME = 'send_records' THEN
-          IF NEW.status = 'accepted' THEN
+          IF NEW.status IN ('accepted','needs_review') THEN
             INSERT INTO outreach_exports(source_key,owner_google_sub,payload,gmail_message_id,accepted_at)
             VALUES ('immediate:' || NEW.id,NEW.owner_google_sub,NEW.pipeline_payload,NEW.gmail_message_id,NOW())
             ON CONFLICT(source_key) DO NOTHING;
@@ -175,11 +175,13 @@ export async function initialiseDb() {
     END;
         $body$ LANGUAGE plpgsql $function$;
       END IF;
-      IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid = 'public.send_records'::regclass AND tgname = 'enqueue_immediate_export') THEN
-        CREATE TRIGGER enqueue_immediate_export AFTER UPDATE OF status ON send_records FOR EACH ROW EXECUTE FUNCTION public.enqueue_outreach_export_v1();
+      IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid = 'public.send_records'::regclass AND tgname = 'enqueue_immediate_export' AND tgfoid = 'public.enqueue_outreach_export_v2()'::regprocedure) THEN
+        DROP TRIGGER IF EXISTS enqueue_immediate_export ON send_records;
+        CREATE TRIGGER enqueue_immediate_export AFTER UPDATE OF status ON send_records FOR EACH ROW EXECUTE FUNCTION public.enqueue_outreach_export_v2();
       END IF;
-      IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid = 'public.scheduled_emails'::regclass AND tgname = 'enqueue_scheduled_export') THEN
-        CREATE TRIGGER enqueue_scheduled_export AFTER UPDATE OF delivery_status ON scheduled_emails FOR EACH ROW EXECUTE FUNCTION public.enqueue_outreach_export_v1();
+      IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid = 'public.scheduled_emails'::regclass AND tgname = 'enqueue_scheduled_export' AND tgfoid = 'public.enqueue_outreach_export_v2()'::regprocedure) THEN
+        DROP TRIGGER IF EXISTS enqueue_scheduled_export ON scheduled_emails;
+        CREATE TRIGGER enqueue_scheduled_export AFTER UPDATE OF delivery_status ON scheduled_emails FOR EACH ROW EXECUTE FUNCTION public.enqueue_outreach_export_v2();
       END IF;
     END $migration$`
     // ON CONFLICT (request_id) needs a unique index on that column. An older
@@ -291,7 +293,11 @@ export async function initialiseDb() {
         const columns = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]
         if (!columns.some(column => column.name === 'pipeline_payload')) db.exec(`ALTER TABLE ${table} ADD COLUMN pipeline_payload TEXT`)
       }
-      db.exec(OUTREACH_EXPORTS_SQLITE_DDL)
+      db.transaction(() => {
+        const trigger = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'enqueue_immediate_export'").get() as { sql: string } | undefined
+        if (trigger && !trigger.sql.includes("NEW.status IN ('accepted','needs_review')")) db.exec('DROP TRIGGER enqueue_immediate_export')
+        db.exec(OUTREACH_EXPORTS_SQLITE_DDL)
+      })()
       db.exec(`CREATE TRIGGER IF NOT EXISTS enqueue_scheduled_export AFTER UPDATE OF delivery_status ON scheduled_emails
         WHEN NEW.delivery_status = 'sent' AND NEW.gmail_message_id IS NOT NULL AND length(trim(NEW.gmail_message_id)) > 0 AND NEW.pipeline_payload IS NOT NULL
         BEGIN

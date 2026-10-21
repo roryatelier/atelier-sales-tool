@@ -39,7 +39,7 @@ const google = {
   auth: { OAuth2: MockOAuth, GoogleAuth: MockGoogleAuth },
   oauth2: () => ({ userinfo: { get: async () => ({ data: userData }) } }),
   gmail: () => ({ users: { messages: { send: async () => { providerCalls++; gmailSendCalls++; const error = gmailSendErrors.shift(); if (error) throw error; if (gmailSendGate) await gmailSendGate; if (gmailSendDelay) await new Promise(resolve => setTimeout(resolve, gmailSendDelay)); return { data: { id: gmailSendReturnId } }; } } } }),
-  sheets: () => ({ spreadsheets: { get: async () => ({data:{sheets:[{properties:{title:'Sheet1',sheetId:0}}]}}), batchUpdate: async () => {if(sheetsShouldFail) throw new Error('Sheets unavailable'); return {data:{replies:[{},{},{},{createDeveloperMetadata:{developerMetadata:{metadataId:1}}}]}}}, values: {
+  sheets: () => ({ spreadsheets: { get: async () => ({data:{sheets:[{properties:{title:'Sheet1',sheetId:0,gridProperties:{rowCount:1000}}}]}}), batchUpdate: async options => {if(sheetsShouldFail) throw new Error('Sheets unavailable'); return {data:{replies:options.requestBody.requests.map(request=>request.createDeveloperMetadata?{createDeveloperMetadata:{developerMetadata:{metadataId:1}}}:{})}}}, values: {
     get: async options => { if (sheetsShouldFail) throw new Error('Sheets unavailable'); return {data:{values:[options.range==='Sheet1!R:S'?['Outreach ID','Recipient Email']:[...Array(17).fill(''),'Outreach ID','Recipient Email']]}} },
     append: async () => { if (sheetsShouldFail) throw new Error('Sheets unavailable'); return {data:{updates:{updatedRange:'Sheet1!A2:S2'}}} },
   } } }),
@@ -78,7 +78,7 @@ function load(relative) {
           if (text.includes('INSERT INTO send_records')) {
             const requestId = values[2];
             if (pgStore.has(requestId)) return { rows: [], rowCount: 0 };
-            const record = { id: pgNextId++, owner: values[0], requestId, status: 'recorded', messageId: null, errorCode: null, hash: values[3] };
+            const record = { id: pgNextId++, owner: values[0], requestId, status: 'recorded', messageId: null, errorCode: null, hash: values[3], pipelinePayload: values[4] ?? null };
             pgStore.set(requestId, record);
             return { rows: [{ id: record.id }], rowCount: 1 };
           }
@@ -110,7 +110,7 @@ function load(relative) {
             record.status = values[0];
             record.messageId = values[1];
             record.errorCode = values[2];
-            if (record.status === 'accepted' && record.pipelinePayload) pgExports.set(`immediate:${record.id}`, { outreach_id:`immediate:${record.id}`,owner_google_sub:record.owner,payload:record.pipelinePayload,status:'pending',destination_id:'',write_intent_at:null,accepted_at:new Date().toISOString() });
+            if (['accepted','needs_review'].includes(record.status) && record.messageId && record.pipelinePayload) pgExports.set(`immediate:${record.id}`, { outreach_id:`immediate:${record.id}`,owner_google_sub:record.owner,payload:record.pipelinePayload,status:'pending',destination_id:'',write_intent_at:null,accepted_at:new Date().toISOString() });
             return { rows: [{ id: record.id }], rowCount: 1 };
           }
           if (text.includes('FROM send_records')) {
@@ -699,7 +699,7 @@ test('a lost outcome write after Gmail acceptance is reported as uncertain, neve
   try {
     cookieValues = { atelier_session: await policy.signSession(user), atelier_gmail: await policy.sealGmailCredentials({ ...user, accessToken: 'test-access' }) };
     const send = load('app/api/send-email/route.ts').POST;
-    const body = { expectedGoogleSub: user.googleSub, request_id: '77777777-2222-3333-4444-555555555555', to: 'contact@example.invalid', subject: 'Hello', emailBody: 'Body', contactName: 'Contact' };
+    const body = { expectedGoogleSub: user.googleSub, request_id: '77777777-2222-3333-4444-555555555555', to: 'contact@example.invalid', subject: 'Hello', emailBody: 'Body', contactName: 'Contact', dossier: {brand_name:'Synthetic'} };
     const request = () => new NextRequest('https://example.invalid/api/send-email', { method: 'POST', headers: { origin: 'https://example.invalid', 'content-type': 'application/json' }, body: JSON.stringify(body) });
     const sendsBefore = gmailSendCalls;
     const response = await send(request());
@@ -711,6 +711,7 @@ test('a lost outcome write after Gmail acceptance is reported as uncertain, neve
     assert.equal(gmailSendCalls, sendsBefore + 1);
     const db = new Database(dbPath);
     const row = db.prepare('SELECT status, gmail_message_id, last_error_code FROM send_records').get();
+    assert.equal(db.prepare('SELECT count(*) AS n FROM outreach_exports').get().n, 1, 'known Gmail acceptance must enqueue even through the review fallback');
     db.close();
     assert.equal(row.status, 'needs_review');
     assert.equal(row.gmail_message_id, 'test-message-id');
@@ -1318,3 +1319,19 @@ test('signature API cannot read or write another account', async () => {
     fs.rmSync(dbPath, { force: true });
   }
 });
+
+test('snapshot persistence outages cannot strand an immediate send before Gmail',async()=>{
+ const Database=require('better-sqlite3');const dbPath=path.join(require('node:os').tmpdir(),`atelier-snapshot-outage-${process.pid}.db`)
+ fs.rmSync(dbPath,{force:true});let outage=true
+ dbMock.initialiseDb=async()=>{const db=new Database(dbPath);db.exec(sendRecordsSchema());db.close()}
+ dbMock.getLocalDb=()=>{const db=new Database(dbPath);return {prepare:sql=>{if(outage && (sql.includes('pipeline_payload')||sql.includes("SET status = 'recorded'")))throw new Error('Synthetic database outage');return db.prepare(sql)},close:()=>db.close()}}
+ try{
+  cookieValues={atelier_session:await policy.signSession(user),atelier_gmail:await policy.sealGmailCredentials({...user,accessToken:'test-access'})}
+  const send=load('app/api/send-email/route.ts').POST
+  const body={expectedGoogleSub:user.googleSub,request_id:'12345678-1234-4123-8123-123456789012',to:'recipient@example.invalid',subject:'Synthetic',emailBody:'Synthetic',contactName:'Synthetic',dossier:{brand_name:'Synthetic'}}
+  const request=()=>new NextRequest('https://example.invalid/api/send-email',{method:'POST',headers:{origin:'https://example.invalid','content-type':'application/json'},body:JSON.stringify(body)})
+  const before=gmailSendCalls;assert.equal((await send(request())).status,503);assert.equal(gmailSendCalls,before)
+  const db=new Database(dbPath);assert.equal(db.prepare('SELECT count(*) AS n FROM send_records').get().n,0);db.close()
+  outage=false;assert.equal((await send(request())).status,200);assert.equal(gmailSendCalls,before+1)
+ }finally{restoreSendMocks();fs.rmSync(dbPath,{force:true})}
+})

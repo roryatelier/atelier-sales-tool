@@ -151,14 +151,14 @@ function sheetsAdapter(behavior = {}) {
   let batches=0;let update
   const headers=[...Array(17).fill(''),'Outreach ID','Recipient Email']
   const google={auth:{GoogleAuth:class {}},sheets:()=>({spreadsheets:{
-    get:async()=>({data:{sheets:[{properties:{title:'Sheet1',sheetId:7}}]}}),
+    get:async()=>({data:{sheets:[{properties:{title:'Sheet1',sheetId:7,gridProperties:{rowCount:behavior.rowCount ?? 1000}}}]}}),
     developerMetadata:{search:async()=>({data:{matchedDeveloperMetadata:behavior.duplicate?[{developerMetadata:{metadataId:41}},{developerMetadata:{metadataId:42}}]:[{developerMetadata:{metadataId:41}}]}})},
     values:{
       get:async options=>({data:{values:options.range==='Sheet1!R:S'?(behavior.badHeaders?[['Occupied','Other']]:[['Outreach ID','Recipient Email']]):[headers,['Existing synthetic row']]}}),
       batchUpdateByDataFilter:async options=>{update=options;return {data:{totalUpdatedCells:1}}},
       update:async()=>{throw new Error('Unexpected positional update for an outreach ID')},
     },
-    batchUpdate:async options=>{batches++;behavior.requests=options.requestBody.requests;return {data:{replies:[{},{},{},{createDeveloperMetadata:{developerMetadata:{metadataId:41}}}]}}},
+    batchUpdate:async options=>{batches++;behavior.requests=options.requestBody.requests;return {data:{replies:options.requestBody.requests.map(request=>request.createDeveloperMetadata?{createDeveloperMetadata:{developerMetadata:{metadataId:41}}}:{})}}},
   }})}
   const exports={}
   const source=ts.transpileModule(fs.readFileSync(path.join(root,'lib/sheets.ts'),'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText
@@ -174,12 +174,13 @@ test('Sheets row creation and its identity metadata use one atomic batch',async(
  const behavior={};const adapter=sheetsAdapter(behavior);let intents=0
  await adapter.exports.appendOutreachRow({brand_name:'Synthetic',to_email:'recipient@example.invalid',email_body:'=literal text'},'immediate:1','synthetic-sheet','2026-01-01T00:00:00Z',async()=>{intents++;return true})
  assert.equal(intents,1);assert.equal(adapter.batches(),1)
- assert.equal(behavior.requests.length,4)
- assert.equal(behavior.requests[1].insertDimension.range.startIndex,2)
- const row=behavior.requests[2].updateCells.rows[0].values
+ assert.equal(behavior.requests.length,3)
+ assert.equal(behavior.requests.some(request=>request.appendDimension),false)
+ assert.equal(behavior.requests[0].insertDimension.range.startIndex,2)
+ const row=behavior.requests[1].updateCells.rows[0].values
  assert.equal(row[12].userEnteredValue.stringValue,'=literal text')
  assert.equal(row[17].userEnteredValue.stringValue,'immediate:1')
- assert.equal(behavior.requests[3].createDeveloperMetadata.developerMetadata.location.dimensionRange.startIndex,2)
+ assert.equal(behavior.requests[2].createDeveloperMetadata.developerMetadata.location.dimensionRange.startIndex,2)
 })
 test('lost or revoked export claim prevents the actual Sheets write',async()=>{
  const adapter=sheetsAdapter()
@@ -242,4 +243,49 @@ test('separate databases cannot collide on the same spreadsheet outreach ID',asy
   const first=await accepted(one);const second=await accepted(two)
   assert.notEqual(first,second,'database row numbers are not globally unique export identities')
  }finally{one.close();two.close()}
+})
+
+test('known Gmail IDs in review fallbacks enqueue, while unknown outcomes do not',async()=>{
+ const f=await fixture();const db=f.db();try{
+  db.prepare(`INSERT INTO send_records(owner_google_sub,owner_email,request_id,payload_hash,status,pipeline_payload) VALUES ('owner','owner@example.invalid','synthetic','hash','sending','{}')`).run()
+  db.prepare("UPDATE send_records SET status='needs_review'").run()
+  assert.equal(db.prepare('SELECT count(*) AS n FROM outreach_exports').get().n,0)
+  db.prepare("UPDATE send_records SET status='needs_review',gmail_message_id='known-gmail-id'").run()
+  assert.equal(db.prepare('SELECT gmail_message_id FROM outreach_exports').get().gmail_message_id,'known-gmail-id')
+ }finally{db.close();f.close()}
+})
+test('SQLite upgrades the earlier accepted-only trigger without dropping events',async()=>{
+ const f=await fixture();const db=f.db();try{
+  const legacy=f.load('lib/db.ts').OUTREACH_EXPORTS_SQLITE_DDL.replace("NEW.status IN ('accepted','needs_review')","NEW.status = 'accepted'")
+  db.transaction(()=>{db.exec('DROP TRIGGER enqueue_immediate_export');db.exec(legacy)})()
+  await f.load('lib/db.ts').initialiseDb()
+  db.prepare(`INSERT INTO send_records(owner_google_sub,owner_email,request_id,payload_hash,status,pipeline_payload) VALUES ('owner','owner@example.invalid','synthetic','hash','sending','{}')`).run()
+  db.prepare("UPDATE send_records SET status='needs_review',gmail_message_id='known-id'").run()
+  assert.equal(db.prepare('SELECT count(*) AS n FROM outreach_exports').get().n,1)
+ }finally{db.close();f.close()}
+})
+test('old review-only jobs cannot consume the slot before new pending exports',async()=>{
+ const f=await fixture();const db=f.db();try{
+  const old=await accepted(f);const fresh=await accepted(f)
+  db.prepare("UPDATE outreach_exports SET status='needs_review',write_intent_at=datetime('now','-1 day'),accepted_at='2000-01-01T00:00:00Z' WHERE outreach_id=?").run(old)
+  await f.load('lib/outreach-outbox.ts').processPipelineExports(1)
+  assert.equal(await f.load('lib/outreach-outbox.ts').exportStatus(fresh,'owner'),'synced')
+  assert.equal(await f.load('lib/outreach-outbox.ts').exportStatus(old,'owner'),'needs_review')
+  assert.equal(f.behavior.appends,1)
+ }finally{db.close();f.close()}
+})
+test('a full grid adds capacity while a normal grid allocates only the inserted row',async()=>{
+ const behavior={rowCount:2};const adapter=sheetsAdapter(behavior)
+ await adapter.exports.appendOutreachRow({},'immediate:1','synthetic-sheet','2026-01-01T00:00:00Z',async()=>true)
+ assert.equal(behavior.requests.length,4);assert.ok(behavior.requests[0].appendDimension)
+ assert.equal(behavior.requests[1].insertDimension.range.startIndex,2)
+})
+test('SQLite naive acceptance timestamps are interpreted as UTC on a non-UTC host',async()=>{
+ const previous=process.env.TZ;process.env.TZ='Asia/Tokyo'
+ try{
+  const behavior={};const adapter=sheetsAdapter(behavior)
+  await adapter.exports.appendOutreachRow({},'immediate:1','synthetic-sheet','2026-01-01 16:00:00',async()=>true)
+  const actual=behavior.requests.find(request=>request.updateCells).updateCells.rows[0].values[13].userEnteredValue.stringValue
+  assert.equal(actual,new Date('2026-01-01T16:00:00Z').toLocaleDateString('en-AU',{timeZone:'Australia/Sydney'}))
+ }finally{if(previous===undefined)delete process.env.TZ;else process.env.TZ=previous}
 })

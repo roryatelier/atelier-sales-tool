@@ -32,6 +32,8 @@ use an explicitly approved internal recipient for live acceptance testing:
 ## State and recovery
 
 An acceptance update and its export event commit together using database triggers.
+A review fallback that durably stores a known Gmail message ID also queues the
+export; unknown outcomes without an ID do not.
 The trigger function is versioned and installed once under a PostgreSQL transaction
 lock; repeated/concurrent request initialization does not replace it. SQLite uses
 inline migrations and equivalent triggers. No historical event is inferred.
@@ -49,7 +51,9 @@ against Sheets/provider evidence. There is no force-append control in this patch
 Pre-write failures use a 15-minute backoff; an owner may retry explicitly sooner.
 
 The existing scheduled-email cron services one queued export per invocation to
-bound the added work. New accepted messages also attempt their own export. A
+bound the added work. Pending and failed exports take priority over review-only
+reconciliation, and attempts rotate within each class. A scheduled email is not
+claimed unless at least 30 seconds remain in the worker budget. New accepted messages also attempt their own export. A
 Gmail configuration failure does not prevent the queued Sheets work from running.
 Export retries have no Gmail operation. If cron stops, the UI can still retry;
 external alerting and a dedicated export worker remain separate work.

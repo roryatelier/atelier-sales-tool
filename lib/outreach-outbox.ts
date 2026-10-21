@@ -100,7 +100,7 @@ export async function processPipelineExports(limit = 3) {
   const now = new Date().toISOString()
   const due = isVercel ? 'next_attempt_at <= ?' : 'datetime(next_attempt_at) <= datetime(?)'
   const rows = await query(`SELECT outreach_id, owner_google_sub FROM outreach_exports WHERE status IN ('pending','failed','needs_review')
-    AND (next_attempt_at IS NULL OR ${due}) ORDER BY accepted_at, outreach_id LIMIT ?`, [now, limit])
+    AND (next_attempt_at IS NULL OR ${due}) ORDER BY CASE status WHEN 'pending' THEN 0 WHEN 'failed' THEN 1 ELSE 2 END, COALESCE(claimed_at, accepted_at), accepted_at, outreach_id LIMIT ?`, [now, limit])
   for (const row of rows) await syncPipelineExport(String(row.outreach_id), String(row.owner_google_sub))
 }
 export async function listPipelineExports(owner: string) {

@@ -30,7 +30,7 @@ export async function GET(request: NextRequest) {
   let sent = 0
   let needsReview = recovery.needs_review
   let needsReauth = 0
-  for (let processed = 0; processed < 20 && Date.now() < deadline; processed++) {
+  for (let processed = 0; processed < 20 && Date.now() + 30_000 < deadline; processed++) {
     const email = await claimNext()
     if (!email) break
     const owner = { googleSub: email.owner_google_sub, email: email.owner_email }
@@ -59,6 +59,10 @@ export async function GET(request: NextRequest) {
         to_email: email.to_email, lead_source: 'Scheduled', contact_name: email.contact_name,
         email_subject: email.subject, email_body: email.body, sent_by: email.owner_email,
       }))
+      if (Date.now() + 15_000 >= deadline) {
+        await failScheduledSend(email, 'pending', 'worker_budget_exhausted')
+        continue
+      }
       if (!await beginScheduledSend(email)) continue
       sendStarted = true
       const messageId = await sendViaGmail(refresh.accessToken, raw)
