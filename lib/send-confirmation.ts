@@ -1,6 +1,6 @@
 // The composer mints one request id when the user confirms a specific draft.
-// The same id is reused only while that confirmed content might already have
-// reached Gmail. A different draft gets a new id. A definite non-delivery
+// The same id is reused when that confirmed content may have reached Gmail,
+// including after acceptance. A different draft gets a new id. A definite refusal
 // clears the id so the user can confirm again.
 
 export interface ConfirmedSendDraft {
@@ -52,13 +52,14 @@ export function shouldRetainRequestId(observation: SendObservation): boolean {
   if (observation.uncertain) return true
   if (observation.outcome === 'needs_review' || observation.outcome === 'uncertain') return true
   if (observation.success) return false
-  if (observation.httpStatus >= 500) return true
-  return false
+  // An unclassified refusal may be an auth failure on replay after the
+  // original request reached Gmail. Only explicit non-delivery clears it.
+  return observation.outcome !== 'failed' && observation.outcome !== 'failed_auth'
 }
 
 export interface ConfirmedSendLedger {
   claim(tabId: string, draftKey: string): string
-  observe(tabId: string, observation: SendObservation): void
+  observe(tabId: string, requestId: string, observation: SendObservation): void
   current(tabId: string): RetainedSend | null
   parked(tabId: string): RetainedSend[]
   restore(tabId: string, retained: RetainedSend | null, parkedSends?: RetainedSend[] | null): void
@@ -66,14 +67,15 @@ export interface ConfirmedSendLedger {
 }
 
 function rememberable(send: RetainedSend | null | undefined): send is RetainedSend {
-  return !!send && REQUEST_ID_PATTERN.test(send.requestId) && send.draftKey.length > 0
+  return !!send && typeof send.requestId === 'string' && REQUEST_ID_PATTERN.test(send.requestId)
+    && typeof send.draftKey === 'string' && send.draftKey.length > 0
 }
 
 export function createConfirmedSendLedger(mint: () => string = () => crypto.randomUUID()): ConfirmedSendLedger {
   const byTab = new Map<string, RetainedSend>()
   // Drafts that may already have reached Gmail stay addressable after the user
   // edits. Returning to that exact content reuses the id; a different draft
-  // gets its own. Definite success or refusal removes only that draft's id.
+  // gets its own. Only a definite refusal removes that draft's parked id.
   const parkedByTab = new Map<string, Map<string, string>>()
 
   function park(tabId: string, send: RetainedSend) {
@@ -105,15 +107,19 @@ export function createConfirmedSendLedger(mint: () => string = () => crypto.rand
       park(tabId, next)
       return next.requestId
     },
-    observe(tabId, observation) {
-      const current = byTab.get(tabId)
+    observe(tabId, requestId, observation) {
+      const current = [...(parkedByTab.get(tabId)?.entries() ?? [])]
+        .map(([draftKey, requestId]) => ({ draftKey, requestId }))
+        .find(send => send.requestId === requestId)
       if (!current) return
       if (shouldRetainRequestId(observation)) {
         park(tabId, current)
         return
       }
-      parkedByTab.get(tabId)?.delete(current.draftKey)
-      if (byTab.get(tabId)?.draftKey === current.draftKey) byTab.delete(tabId)
+      // Keep accepted bytes parked too: if the visible sent state is lost,
+      // confirming them again replays acceptance instead of sending again.
+      if (observation.kind === 'response' && !observation.success) parkedByTab.get(tabId)?.delete(current.draftKey)
+      if (byTab.get(tabId)?.requestId === requestId) byTab.delete(tabId)
     },
     current(tabId) {
       return byTab.get(tabId) ?? null
@@ -126,7 +132,7 @@ export function createConfirmedSendLedger(mint: () => string = () => crypto.rand
     restore(tabId, retained, parkedSends) {
       byTab.delete(tabId)
       parkedByTab.delete(tabId)
-      for (const send of parkedSends ?? []) if (rememberable(send)) park(tabId, send)
+      for (const send of Array.isArray(parkedSends) ? parkedSends : []) if (rememberable(send)) park(tabId, send)
       if (rememberable(retained)) {
         park(tabId, retained)
         byTab.set(tabId, retained)

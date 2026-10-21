@@ -821,6 +821,73 @@ test('an older sqlite send_records table gains the request_id conflict target be
   }
 });
 
+test('existing unique SQLite send records gain all outcome invariants and required columns without losing rows', async () => {
+  const os = require('node:os');
+  const Database = require('better-sqlite3');
+  const schema = load('lib/db.ts').SEND_RECORDS_SQLITE_DDL;
+  const acceptedCheck = ",\n        CHECK (status != 'accepted' OR (gmail_message_id IS NOT NULL AND gmail_message_id != ''))";
+  const variants = [
+    ['old status check', schema.replace(",'needs_review'", '')],
+    ['missing accepted message check', schema.replace(acceptedCheck, '')],
+    ['missing outcome column', schema.replace('        last_error_code TEXT,\n', '')],
+  ];
+  const previous = process.cwd();
+  for (const [label, legacySchema] of variants) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'atelier-send-invariants-'));
+    let db;
+    try {
+      db = new Database(path.join(dir, 'atelier.db'));
+      db.exec(legacySchema);
+      db.prepare(`INSERT INTO send_records (owner_google_sub, owner_email, request_id, payload_hash, status, gmail_message_id) VALUES (?, ?, ?, ?, ?, ?)`)
+        .run('owner', 'owner@example.invalid', 'kept-id', 'kept-hash', 'accepted', 'kept-message-id');
+      const before = db.prepare('SELECT * FROM send_records').get();
+      db.close();
+      process.chdir(dir);
+      await load('lib/db.ts').initialiseDb();
+      db = new Database(path.join(dir, 'atelier.db'));
+      const after = db.prepare('SELECT * FROM send_records').get();
+      for (const [column, value] of Object.entries(before)) assert.equal(after[column], value, `${label}: ${column}`);
+      assert.ok(db.prepare('PRAGMA table_info(send_records)').all().some(column => column.name === 'last_error_code'));
+      db.prepare(`INSERT INTO send_records (owner_google_sub, owner_email, request_id, payload_hash, status) VALUES ('owner', 'owner@example.invalid', 'review-id', 'hash', 'needs_review')`).run();
+      for (const messageId of [null, '']) {
+        assert.throws(() => db.prepare(`INSERT INTO send_records (owner_google_sub, owner_email, request_id, payload_hash, status, gmail_message_id) VALUES ('owner', 'owner@example.invalid', 'invalid-id', 'hash', 'accepted', ?)`).run(messageId), /CHECK constraint failed/, label);
+      }
+      assert.throws(() => db.prepare(`INSERT INTO send_records (owner_google_sub, owner_email, request_id, payload_hash, status) VALUES ('other', 'other@example.invalid', 'kept-id', 'hash', 'recorded')`).run(), /UNIQUE constraint failed/, label);
+      await load('lib/db.ts').initialiseDb();
+      assert.equal(db.prepare('SELECT count(*) AS count FROM send_records').get().count, 2, `${label}: repeated init preserves rows`);
+    } finally {
+      if (db?.open) db.close();
+      process.chdir(previous);
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test('incompatible legacy SQLite outcomes roll back the migration and fail closed', async () => {
+  const os = require('node:os');
+  const Database = require('better-sqlite3');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'atelier-send-invalid-'));
+  const previous = process.cwd();
+  let db;
+  try {
+    db = new Database(path.join(dir, 'atelier.db'));
+    db.exec(load('lib/db.ts').SEND_RECORDS_SQLITE_DDL.replace(",\n        CHECK (status != 'accepted' OR (gmail_message_id IS NOT NULL AND gmail_message_id != ''))", ''));
+    db.prepare(`INSERT INTO send_records (owner_google_sub, owner_email, request_id, payload_hash, status) VALUES ('owner', 'owner@example.invalid', 'legacy-id', 'hash', 'accepted')`).run();
+    const before = db.prepare('SELECT * FROM send_records').get();
+    db.close();
+    process.chdir(dir);
+    await assert.rejects(load('lib/db.ts').initialiseDb(), /CHECK constraint failed/);
+    db = new Database(path.join(dir, 'atelier.db'));
+    assert.deepEqual(db.prepare('SELECT * FROM send_records').get(), before);
+    assert.equal(db.prepare("SELECT name FROM sqlite_master WHERE name = 'send_records_legacy'").get(), undefined);
+    await assert.rejects(load('lib/db.ts').initialiseDb(), /CHECK constraint failed/);
+  } finally {
+    if (db?.open) db.close();
+    process.chdir(previous);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 function sendRequest(body) {
   return new NextRequest('https://example.invalid/api/send-email', { method: 'POST', headers: { origin: 'https://example.invalid', 'content-type': 'application/json' }, body: JSON.stringify(body) });
 }
@@ -1087,7 +1154,7 @@ test('Postgres outcome writes update only the claimed request id', async () => {
   }
 });
 
-test('the composer reuses a confirmed request id only for an uncertain retry of that draft', () => {
+test('the composer keeps confirmed content replayable across uncertainty, acceptance, edits and reload', () => {
   const { createConfirmedSendLedger, confirmedSendDraftKey } = load('lib/send-confirmation.ts');
   const draft = { to: 'contact@example.invalid', cc: '', bcc: '', subject: 'Hello', emailBody: 'Body', attachments: [] };
   const key = confirmedSendDraftKey(draft);
@@ -1095,11 +1162,11 @@ test('the composer reuses a confirmed request id only for an uncertain retry of 
   const ledger = createConfirmedSendLedger(() => '10000000-0000-4000-8000-00000000000' + (++minted));
   const first = ledger.claim('tab-0', key);
   assert.equal(first, ledger.claim('tab-0', key));
-  ledger.observe('tab-0', { kind: 'network_error' });
+  ledger.observe('tab-0', ledger.current('tab-0').requestId, { kind: 'network_error' });
   assert.equal(ledger.claim('tab-0', key), first);
-  ledger.observe('tab-0', { kind: 'response', httpStatus: 409, uncertain: true, outcome: 'uncertain', success: false });
+  ledger.observe('tab-0', ledger.current('tab-0').requestId, { kind: 'response', httpStatus: 409, uncertain: true, outcome: 'uncertain', success: false });
   assert.equal(ledger.claim('tab-0', key), first);
-  ledger.observe('tab-0', { kind: 'response', httpStatus: 502, uncertain: true, outcome: 'needs_review', success: false });
+  ledger.observe('tab-0', ledger.current('tab-0').requestId, { kind: 'response', httpStatus: 502, uncertain: true, outcome: 'needs_review', success: false });
   assert.equal(ledger.claim('tab-0', key), first);
   const otherTab = ledger.claim('tab-1', key);
   assert.notEqual(otherTab, first);
@@ -1108,15 +1175,15 @@ test('the composer reuses a confirmed request id only for an uncertain retry of 
   assert.notEqual(next, first);
   assert.equal(ledger.claim('tab-0', key), first);
   assert.equal(ledger.claim('tab-0', changed), next);
-  ledger.observe('tab-0', { kind: 'response', httpStatus: 200, success: true, outcome: 'accepted' });
+  ledger.observe('tab-0', ledger.current('tab-0').requestId, { kind: 'response', httpStatus: 200, success: true, outcome: 'accepted' });
   assert.equal(ledger.current('tab-0'), null);
   assert.equal(ledger.claim('tab-0', key), first);
   const afterSuccess = ledger.claim('tab-0', changed);
-  assert.notEqual(afterSuccess, next);
-  ledger.observe('tab-0', { kind: 'response', httpStatus: 429, success: false, outcome: 'failed' });
+  assert.equal(afterSuccess, next, 'accepted content remains replayable');
+  ledger.observe('tab-0', ledger.current('tab-0').requestId, { kind: 'response', httpStatus: 429, success: false, outcome: 'failed' });
   assert.equal(ledger.current('tab-0'), null);
   const uncertainChanged = ledger.claim('tab-0', changed);
-  ledger.observe('tab-0', { kind: 'response', httpStatus: 200, success: true, uncertain: true, outcome: 'needs_review' });
+  ledger.observe('tab-0', ledger.current('tab-0').requestId, { kind: 'response', httpStatus: 200, success: true, uncertain: true, outcome: 'needs_review' });
   assert.equal(ledger.current('tab-0').draftKey, changed);
   const parked = ledger.parked('tab-0');
   assert.equal(parked.some(send => send.requestId === first && send.draftKey === key), true);
@@ -1124,6 +1191,15 @@ test('the composer reuses a confirmed request id only for an uncertain retry of 
   ledger.restore('tab-0', { requestId: first, draftKey: key }, parked);
   assert.equal(ledger.claim('tab-0', key), first);
   assert.equal(ledger.claim('tab-0', changed), uncertainChanged);
+  // A delayed reply belongs to its request, even after another draft is active.
+  ledger.observe('tab-0', first, { kind: 'response', httpStatus: 429, outcome: 'failed' });
+  assert.equal(ledger.current('tab-0').requestId, uncertainChanged);
+  ledger.observe('tab-0', uncertainChanged, { kind: 'response', httpStatus: 401 });
+  assert.equal(ledger.claim('tab-0', changed), uncertainChanged, 'expired replay auth must not discard a possibly sent id');
+  const recovered = createConfirmedSendLedger();
+  recovered.restore('tab-0', { requestId: 'not-a-uuid', draftKey: null }, [{ requestId: first }]);
+  assert.equal(recovered.current('tab-0'), null);
+  assert.equal(recovered.parked('tab-0').length, 0);
   const page = fs.readFileSync(path.join(root, 'app/email/page.tsx'), 'utf8');
   const handleSend = page.slice(page.indexOf('async function handleSend'), page.indexOf('if (!checked)'));
   assert.match(handleSend, /request_id: requestId/);

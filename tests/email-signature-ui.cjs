@@ -66,6 +66,7 @@ test('save a signature, generate, regenerate, and preview the same signature on 
     page.on('pageerror', error => errors.push(error.message))
     const sent = []
     const scheduled = []
+    let releaseDelayedSend
     await page.route('**/api/send-email', async route => {
       sent.push(route.request().postDataJSON())
       if (sent.length === 1) {
@@ -80,7 +81,8 @@ test('save a signature, generate, regenerate, and preview the same signature on 
         await route.abort('failed')
         return
       }
-      await route.fulfill({ json: { success: true, outcome: 'accepted', message_id: 'fixture-message', pipeline_synced: true } })
+      if (sent.length === 4) await new Promise(resolve => { releaseDelayedSend = resolve })
+      await route.fulfill({ json: { success: true, outcome: 'accepted', message_id: 'fixture-message', ...(sent.length === 4 ? { replayed: true } : { pipeline_synced: true }) } })
     })
     await page.route('**/api/schedule-email', async route => {
       scheduled.push(route.request().postDataJSON())
@@ -180,12 +182,19 @@ test('save a signature, generate, regenerate, and preview the same signature on 
     assert.match(scheduled[0].body, /Draft \d+/)
 
     await page.getByRole('tab', { name: /Fixture Brand · Fixture/ }).click()
+    await page.locator('input[type="file"]').setInputFiles({ name: 'fixture.txt', mimeType: 'text/plain', buffer: Buffer.from('Fixture attachment') })
     await page.getByRole('button', { name: 'Send email' }).click()
     await page.locator('.modal-foot').getByRole('button', { name: 'Confirm send' }).click()
     await page.getByText('This send is in progress or its outcome was not confirmed. Check Sent mail before retrying.').waitFor()
+    // Reload without any intervening draft edit: the confirmed id must already
+    // be durable, and the exact payload (including attachments) must survive.
+    await page.reload()
+    await page.locator('textarea').waitFor()
     await page.getByRole('button', { name: 'Send email' }).click()
     await page.locator('.modal-foot').getByRole('button', { name: 'Confirm send' }).click()
-    await page.getByText('Something went wrong. Please try again.').waitFor()
+    await page.getByText('Gmail did not confirm this send. Check Sent mail before trying again.').waitFor()
+    assert.equal(sent[1].request_id, sent[0].request_id, 'reload must replay the original send identity')
+    assert.deepEqual(sent[1].attachments, sent[0].attachments, 'reload must preserve confirmed attachments')
     const subject = page.locator('label.field-label', { hasText: /^Subject$/ }).locator('..').locator('input')
     await subject.fill('Changed fixture subject')
     await page.waitForFunction(() => {
@@ -206,6 +215,48 @@ test('save a signature, generate, regenerate, and preview the same signature on 
       assert.equal(occurrences(payload.emailBody, SIGNATURE), 1)
       assert.match(payload.emailBody, new RegExp(`Draft ${currentDraft}`))
     }
+
+    // Storage failure must prevent a provider request, rather than silently
+    // starting a send whose identity cannot survive a reload.
+    await page.getByRole('button', { name: 'New email tab' }).click()
+    await page.locator('textarea').waitFor()
+    const nextSubject = page.locator('label.field-label', { hasText: /^Subject$/ }).locator('..').locator('input')
+    await nextSubject.fill('Delayed fixture subject')
+    await page.evaluate(() => {
+      window.originalStorageSetItem = Storage.prototype.setItem
+      Storage.prototype.setItem = function(key, value) {
+        if (key.endsWith(':email_tabs')) throw new DOMException('Fixture quota', 'QuotaExceededError')
+        return window.originalStorageSetItem.call(this, key, value)
+      }
+    })
+    await page.getByRole('button', { name: 'Send email' }).click()
+    await page.locator('.modal-foot').getByRole('button', { name: 'Confirm send' }).click()
+    await page.getByText('Could not save this confirmation safely. Free browser storage and try again. This attempt was not sent.').waitFor()
+    assert.equal(sent.length, 3)
+    await page.evaluate(() => { Storage.prototype.setItem = window.originalStorageSetItem })
+
+    // Keep A's request pending while switching to B. A's late acceptance must
+    // update A alone, and attachments must not leak into this new draft.
+    await page.getByRole('button', { name: 'Send email' }).click()
+    const delayedRequest = page.waitForRequest(request => request.url().endsWith('/api/send-email'))
+    await page.locator('.modal-foot').getByRole('button', { name: 'Confirm send' }).click()
+    await delayedRequest
+    assert.equal(sent[3].attachments, undefined, 'attachments belong to their original draft tab')
+    await page.locator('.modal-foot').getByRole('button', { name: 'Cancel' }).click()
+    await page.getByRole('button', { name: 'New email tab' }).click()
+    await page.locator('textarea').waitFor()
+    await page.locator('label.field-label', { hasText: /^Subject$/ }).locator('..').locator('input').fill('Unsent fixture subject')
+    releaseDelayedSend()
+    await page.waitForFunction(() => JSON.parse(localStorage.getItem('atelier:draft:v2:owner-sig:email_tabs')).tabs.some(tab => tab.email?.subject === 'Delayed fixture subject' && tab.sent))
+    assert.equal(await page.getByText('Email sent successfully').count(), 0, 'B must not inherit A acceptance')
+    const persisted = await page.evaluate(() => JSON.parse(localStorage.getItem('atelier:draft:v2:owner-sig:email_tabs')))
+    const sentTab = persisted.tabs.find(tab => tab.email?.subject === 'Delayed fixture subject')
+    assert.ok(sentTab)
+    await page.getByRole('tab').nth(persisted.tabs.findIndex(tab => tab.id === sentTab.id)).click()
+    await page.getByText('Email sent successfully').waitFor()
+    await page.getByText('Gmail accepted this email, but pipeline sync could not be confirmed. Check the pipeline separately; do not resend the email.').waitFor()
+    await page.reload()
+    await page.getByText('Email sent successfully').waitFor()
     assert.deepEqual(errors, [])
   } finally {
     if (browser) await browser.close()

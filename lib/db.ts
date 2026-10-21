@@ -23,20 +23,29 @@ export const SEND_RECORDS_SQLITE_DDL = `CREATE TABLE IF NOT EXISTS send_records 
         CHECK (status != 'accepted' OR (gmail_message_id IS NOT NULL AND gmail_message_id != ''))
       )`
 
-function sqliteSendRecordsReady(sql: string): boolean {
+function sqliteSendRecordsReady(sql: string, columns: Set<string>): boolean {
   const normalized = sql.replace(/\s+/g, ' ').toLowerCase()
-  return /unique\s*\(\s*request_id\s*\)/.test(normalized)
-    && normalized.includes('gmail_message_id')
-    && normalized.includes('accepted')
+  const statuses = normalized.match(/check\s*\(\s*status\s+in\s*\(([^)]+)\)\s*\)/)?.[1]
+    .split(',').map(value => value.trim()) ?? []
+  const requiredStatuses = ['recorded', 'sending', 'accepted', 'failed_auth', 'failed', 'needs_review']
+  const requiredColumns = ['id', 'owner_google_sub', 'owner_email', 'request_id', 'payload_hash', 'status',
+    'gmail_message_id', 'last_error_code', 'last_error', 'created_at', 'updated_at', 'accepted_at']
+  return requiredColumns.every(column => columns.has(column))
+    && /unique\s*\(\s*request_id\s*\)/.test(normalized)
+    && statuses.length === requiredStatuses.length
+    && requiredStatuses.every(status => statuses.includes(`'${status}'`))
+    && /check\s*\(\s*status\s*(?:!=|<>)\s*'accepted'\s+or\s*\(\s*gmail_message_id\s+is\s+not\s+null\s+and\s+gmail_message_id\s*(?:!=|<>)\s*''\s*\)\s*\)/.test(normalized)
 }
 
 // CREATE TABLE IF NOT EXISTS leaves an older send_records table untouched, so a
-// preview database from an earlier draft of this branch can lack the unique
-// request_id target. Rebuild only in that case. A failed rebuild rolls back and
+// preview database from an earlier draft can lack columns or either invariant,
+// even when request_id is already unique. A failed rebuild rolls back and
 // initialiseDb throws, which refuses the send before Gmail is contacted.
 function ensureSqliteSendRecords(db: { prepare: (sql: string) => { get: (...args: unknown[]) => { sql?: string } | undefined; all: (...args: unknown[]) => { name: string }[] }; exec: (sql: string) => void; transaction: (fn: () => void) => () => void }) {
   const existing = db.prepare(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'send_records'`).get()
-  if (!existing?.sql || sqliteSendRecordsReady(existing.sql)) return
+  if (!existing?.sql) return
+  const columns = new Set(db.prepare('PRAGMA table_info(send_records)').all().map(column => column.name))
+  if (sqliteSendRecordsReady(existing.sql, columns)) return
   const rebuild = db.transaction(() => {
     db.exec('ALTER TABLE send_records RENAME TO send_records_legacy')
     db.exec(SEND_RECORDS_SQLITE_DDL)
@@ -176,38 +185,41 @@ export async function initialiseDb() {
     const Database = require('better-sqlite3')
     const path = require('path')
     const db = new Database(path.join(process.cwd(), 'atelier.db'))
-    db.pragma('journal_mode = WAL')
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS dossiers (id INTEGER PRIMARY KEY AUTOINCREMENT, brand_name TEXT NOT NULL, brand_name_normalised TEXT NOT NULL UNIQUE, dossier_json TEXT NOT NULL, created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')));
-      CREATE TABLE IF NOT EXISTS usage_log (id INTEGER PRIMARY KEY AUTOINCREMENT, brand_name TEXT NOT NULL, call_type TEXT NOT NULL, input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL, rate_per_million_input REAL NOT NULL, rate_per_million_output REAL NOT NULL, estimated_cost_usd REAL NOT NULL, created_at TEXT DEFAULT (datetime('now')));
-      CREATE TABLE IF NOT EXISTS templates (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, role TEXT NOT NULL, subject TEXT NOT NULL, body TEXT NOT NULL, target_role TEXT DEFAULT '', source TEXT DEFAULT 'user', created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')));
-      CREATE TABLE IF NOT EXISTS email_guidance (id INTEGER PRIMARY KEY, content TEXT NOT NULL, updated_at TEXT DEFAULT (datetime('now')));
-      CREATE TABLE IF NOT EXISTS content_migrations (key TEXT PRIMARY KEY, applied_at TEXT DEFAULT (datetime('now')));
-      CREATE TABLE IF NOT EXISTS email_signatures (owner_google_sub TEXT PRIMARY KEY, owner_email TEXT NOT NULL DEFAULT '', content TEXT NOT NULL DEFAULT '', updated_at TEXT DEFAULT (datetime('now')));
-      CREATE TABLE IF NOT EXISTS contact_history (id INTEGER PRIMARY KEY AUTOINCREMENT, brand_name TEXT NOT NULL, contact_role TEXT NOT NULL, contact_name TEXT NOT NULL, contact_email TEXT NOT NULL, method TEXT DEFAULT 'email', sent_at TEXT DEFAULT (datetime('now')));
-      CREATE TABLE IF NOT EXISTS saved_suggestions (id INTEGER PRIMARY KEY AUTOINCREMENT, brand_name TEXT NOT NULL UNIQUE, category TEXT NOT NULL, reason TEXT NOT NULL, signal TEXT NOT NULL, created_at TEXT DEFAULT (datetime('now')));
-      CREATE TABLE IF NOT EXISTS scheduled_emails (id INTEGER PRIMARY KEY AUTOINCREMENT, to_email TEXT NOT NULL, cc TEXT, bcc TEXT, subject TEXT NOT NULL, body TEXT NOT NULL, brand_name TEXT, contact_name TEXT, scheduled_at TEXT NOT NULL, sent INTEGER DEFAULT 0, created_at TEXT DEFAULT (datetime('now')), gmail_access_token TEXT, gmail_refresh_token TEXT, timezone TEXT DEFAULT 'Australia/Sydney', sent_by TEXT DEFAULT '', dossier_json TEXT DEFAULT '');
-    `)
-    db.exec(SEND_RECORDS_SQLITE_DDL)
-    try { db.exec(`ALTER TABLE email_guidance ADD COLUMN source TEXT NOT NULL DEFAULT 'unknown'`) } catch (error) {
-      if (!String(error).includes('duplicate column name')) throw error
+    try {
+      db.pragma('journal_mode = WAL')
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS dossiers (id INTEGER PRIMARY KEY AUTOINCREMENT, brand_name TEXT NOT NULL, brand_name_normalised TEXT NOT NULL UNIQUE, dossier_json TEXT NOT NULL, created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')));
+        CREATE TABLE IF NOT EXISTS usage_log (id INTEGER PRIMARY KEY AUTOINCREMENT, brand_name TEXT NOT NULL, call_type TEXT NOT NULL, input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL, rate_per_million_input REAL NOT NULL, rate_per_million_output REAL NOT NULL, estimated_cost_usd REAL NOT NULL, created_at TEXT DEFAULT (datetime('now')));
+        CREATE TABLE IF NOT EXISTS templates (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, role TEXT NOT NULL, subject TEXT NOT NULL, body TEXT NOT NULL, target_role TEXT DEFAULT '', source TEXT DEFAULT 'user', created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')));
+        CREATE TABLE IF NOT EXISTS email_guidance (id INTEGER PRIMARY KEY, content TEXT NOT NULL, updated_at TEXT DEFAULT (datetime('now')));
+        CREATE TABLE IF NOT EXISTS content_migrations (key TEXT PRIMARY KEY, applied_at TEXT DEFAULT (datetime('now')));
+        CREATE TABLE IF NOT EXISTS email_signatures (owner_google_sub TEXT PRIMARY KEY, owner_email TEXT NOT NULL DEFAULT '', content TEXT NOT NULL DEFAULT '', updated_at TEXT DEFAULT (datetime('now')));
+        CREATE TABLE IF NOT EXISTS contact_history (id INTEGER PRIMARY KEY AUTOINCREMENT, brand_name TEXT NOT NULL, contact_role TEXT NOT NULL, contact_name TEXT NOT NULL, contact_email TEXT NOT NULL, method TEXT DEFAULT 'email', sent_at TEXT DEFAULT (datetime('now')));
+        CREATE TABLE IF NOT EXISTS saved_suggestions (id INTEGER PRIMARY KEY AUTOINCREMENT, brand_name TEXT NOT NULL UNIQUE, category TEXT NOT NULL, reason TEXT NOT NULL, signal TEXT NOT NULL, created_at TEXT DEFAULT (datetime('now')));
+        CREATE TABLE IF NOT EXISTS scheduled_emails (id INTEGER PRIMARY KEY AUTOINCREMENT, to_email TEXT NOT NULL, cc TEXT, bcc TEXT, subject TEXT NOT NULL, body TEXT NOT NULL, brand_name TEXT, contact_name TEXT, scheduled_at TEXT NOT NULL, sent INTEGER DEFAULT 0, created_at TEXT DEFAULT (datetime('now')), gmail_access_token TEXT, gmail_refresh_token TEXT, timezone TEXT DEFAULT 'Australia/Sydney', sent_by TEXT DEFAULT '', dossier_json TEXT DEFAULT '');
+      `)
+      db.exec(SEND_RECORDS_SQLITE_DDL)
+      try { db.exec(`ALTER TABLE email_guidance ADD COLUMN source TEXT NOT NULL DEFAULT 'unknown'`) } catch (error) {
+        if (!String(error).includes('duplicate column name')) throw error
+      }
+      try { db.exec(`ALTER TABLE templates ADD COLUMN target_role TEXT DEFAULT ''`) } catch {}
+      try { db.exec(`ALTER TABLE templates ADD COLUMN source TEXT DEFAULT 'user'`) } catch {}
+      try { db.exec(`ALTER TABLE scheduled_emails ADD COLUMN timezone TEXT DEFAULT 'Australia/Sydney'`) } catch {}
+      try { db.exec(`ALTER TABLE scheduled_emails ADD COLUMN sent_by TEXT DEFAULT ''`) } catch {}
+      try { db.exec(`ALTER TABLE scheduled_emails ADD COLUMN dossier_json TEXT DEFAULT ''`) } catch {}
+      try { db.exec(`ALTER TABLE scheduled_emails ADD COLUMN owner_google_sub TEXT`) } catch {}
+      try { db.exec(`ALTER TABLE scheduled_emails ADD COLUMN owner_email TEXT`) } catch {}
+      try { db.exec(`ALTER TABLE scheduled_emails ADD COLUMN credential_ciphertext TEXT`) } catch {}
+      try { db.exec(`ALTER TABLE scheduled_emails ADD COLUMN delivery_status TEXT DEFAULT 'legacy_quarantined'`) } catch {}
+      try { db.exec(`ALTER TABLE scheduled_emails ADD COLUMN attempt_count INTEGER DEFAULT 0`) } catch {}
+      try { db.exec(`ALTER TABLE scheduled_emails ADD COLUMN claimed_at TEXT`) } catch {}
+      try { db.exec(`ALTER TABLE scheduled_emails ADD COLUMN sent_at TEXT`) } catch {}
+      try { db.exec(`ALTER TABLE scheduled_emails ADD COLUMN gmail_message_id TEXT`) } catch {}
+      try { db.exec(`ALTER TABLE scheduled_emails ADD COLUMN last_error_code TEXT`) } catch {}
+      ensureSqliteSendRecords(db)
+    } finally {
+      db.close()
     }
-    try { db.exec(`ALTER TABLE templates ADD COLUMN target_role TEXT DEFAULT ''`) } catch {}
-    try { db.exec(`ALTER TABLE templates ADD COLUMN source TEXT DEFAULT 'user'`) } catch {}
-    try { db.exec(`ALTER TABLE scheduled_emails ADD COLUMN timezone TEXT DEFAULT 'Australia/Sydney'`) } catch {}
-    try { db.exec(`ALTER TABLE scheduled_emails ADD COLUMN sent_by TEXT DEFAULT ''`) } catch {}
-    try { db.exec(`ALTER TABLE scheduled_emails ADD COLUMN dossier_json TEXT DEFAULT ''`) } catch {}
-    try { db.exec(`ALTER TABLE scheduled_emails ADD COLUMN owner_google_sub TEXT`) } catch {}
-    try { db.exec(`ALTER TABLE scheduled_emails ADD COLUMN owner_email TEXT`) } catch {}
-    try { db.exec(`ALTER TABLE scheduled_emails ADD COLUMN credential_ciphertext TEXT`) } catch {}
-    try { db.exec(`ALTER TABLE scheduled_emails ADD COLUMN delivery_status TEXT DEFAULT 'legacy_quarantined'`) } catch {}
-    try { db.exec(`ALTER TABLE scheduled_emails ADD COLUMN attempt_count INTEGER DEFAULT 0`) } catch {}
-    try { db.exec(`ALTER TABLE scheduled_emails ADD COLUMN claimed_at TEXT`) } catch {}
-    try { db.exec(`ALTER TABLE scheduled_emails ADD COLUMN sent_at TEXT`) } catch {}
-    try { db.exec(`ALTER TABLE scheduled_emails ADD COLUMN gmail_message_id TEXT`) } catch {}
-    try { db.exec(`ALTER TABLE scheduled_emails ADD COLUMN last_error_code TEXT`) } catch {}
-    ensureSqliteSendRecords(db)
-    db.close()
   }
 }
 
