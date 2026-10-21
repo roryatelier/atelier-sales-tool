@@ -88,7 +88,7 @@ interface TabSnapshot {
   activeTemplate: ActiveTemplate | null
   draftProvenance: DraftProvenance | null
   draftInstruction: string
-  followUpContext: {original_subject?: string; contact_name?: string; date_sent?: string} | null
+  followUpContext: {outreach_id?: string; original_subject?: string; contact_name?: string; date_sent?: string} | null
   selectedBullet: string
   outreachTiming: {recommended_day: string; recommended_date: string; day_reason: string; urgency: string; urgency_reason: string; signal_context: string | null; within_hours: number | null} | null
   pitchAngles: Record<string, string[]>
@@ -142,7 +142,7 @@ export default function EmailPage() {
   const [loadingPitch, setLoadingPitch] = useState(false)
   const [selectedPitchRole, setSelectedPitchRole] = useState('CEO')
   const [showPitch, setShowPitch] = useState(false)
-  const [followUpContext, setFollowUpContext] = useState<{original_subject?: string; contact_name?: string; date_sent?: string} | null>(null)
+  const [followUpContext, setFollowUpContext] = useState<{outreach_id?: string; original_subject?: string; contact_name?: string; date_sent?: string} | null>(null)
   const [outreachTiming, setOutreachTiming] = useState<{recommended_day: string; recommended_date: string; day_reason: string; urgency: string; urgency_reason: string; signal_context: string | null; within_hours: number | null} | null>(null)
   const [showTimingDetail, setShowTimingDetail] = useState(false)
   const [selectedBullet, setSelectedBullet] = useState<string>('')
@@ -174,7 +174,7 @@ export default function EmailPage() {
   const tabsRestoredRef = useRef(false)
   const pendingContactForTabRef = useRef<Contact | null>(null)
   // Set only from localStorage load — never cleared by tab switching — used as send-time fallback
-  const followUpContextRef = useRef<{original_subject?: string; contact_name?: string; date_sent?: string} | null>(null)
+  const followUpContextRef = useRef<{outreach_id?: string; original_subject?: string; contact_name?: string; date_sent?: string} | null>(null)
   // One request id per confirmed draft, kept per tab so a retry of an uncertain
   // send cannot mint a second id. A changed draft claims a new id.
   const confirmedSendsRef = useRef(createConfirmedSendLedger())
@@ -1088,15 +1088,14 @@ export default function EmailPage() {
       applyResult({ sent: true, error: '', pipelineSynced: data.pipeline_synced ?? null })
 
       try {
-        const lsRaw = userStorage.getItem('follow_up_context')
-        const effectiveFollowUp = followUpContext ?? (lsRaw ? JSON.parse(lsRaw) : null)
+        const effectiveFollowUp = followUpContext
         if (effectiveFollowUp && dossier) {
-          userStorage.removeItem('follow_up_context')
-          followUpContextRef.current = null
+          const stored = userStorage.getItem('follow_up_context')
+          if (stored && JSON.stringify(JSON.parse(stored)) === JSON.stringify(effectiveFollowUp)) userStorage.removeItem('follow_up_context')
           fetch('/api/update-pipeline', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ brand_name: dossier.brand_name, status: 'Follow-up 1' }),
+            body: JSON.stringify({ brand_name: dossier.brand_name, outreach_id: effectiveFollowUp.outreach_id, status: 'Follow-up 1' }),
           }).catch(() => console.error('Follow-up pipeline update failed'))
         }
       } catch {

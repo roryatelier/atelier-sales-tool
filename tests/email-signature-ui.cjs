@@ -1,3 +1,4 @@
+const stopFixtureServer = require('./stop-fixture-server.cjs')
 const test = require('node:test')
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
@@ -66,6 +67,8 @@ test('save a signature, generate, regenerate, and preview the same signature on 
     page.on('pageerror', error => errors.push(error.message))
     const sent = []
     const scheduled = []
+    const pipelineUpdates = []
+    await page.route('**/api/update-pipeline', route => { pipelineUpdates.push(route.request().postDataJSON()); return route.fulfill({json:{success:true}}) })
     let releaseDelayedSend
     let markDelayedSendStarted
     const delayedSendStarted = new Promise(resolve => { markDelayedSendStarted = resolve })
@@ -219,10 +222,13 @@ test('save a signature, generate, regenerate, and preview the same signature on 
       const label = [...document.querySelectorAll('label.field-label')].find(node => node.textContent === 'Subject')
       return label?.parentElement?.querySelector('input')?.value === 'Changed fixture subject'
     })
+    await page.evaluate(() => localStorage.setItem('atelier:draft:v2:owner-sig:follow_up_context', JSON.stringify({outreach_id:'immediate:999',original_subject:'Another contact',contact_name:'Another contact',date_sent:'01/01/2026'})))
     await page.getByRole('button', { name: 'Send email' }).click()
     await page.locator('.modal-foot').getByRole('button', { name: 'Confirm send' }).click()
     await page.getByText('Email sent successfully').waitFor()
     assert.equal(sent.length, 3)
+    assert.equal(pipelineUpdates.length, 0, 'an unrelated draft must not consume another contact follow-up context')
+    await page.evaluate(() => localStorage.removeItem('atelier:draft:v2:owner-sig:follow_up_context'))
     const requestId = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
     assert.match(sent[0].request_id, requestId)
     assert.equal(sent[1].request_id, sent[0].request_id)
@@ -308,9 +314,9 @@ test('save a signature, generate, regenerate, and preview the same signature on 
     assert.deepEqual(errors, [])
   } finally {
     if (browser) await browser.close()
-    server.kill('SIGTERM')
+    await stopFixtureServer(server)
     log.end()
-    fs.rmSync(fixture, { recursive: true, force: true })
+    fs.rmSync(fixture, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
   }
 })
 

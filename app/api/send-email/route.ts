@@ -1,6 +1,6 @@
 import { getGmailCredentials } from '@/lib/session'
 import { sealGmailCredentials } from '@/lib/auth-policy'
-import { appendPipelineRow } from '@/lib/sheets'
+import { pipelineSnapshot, syncPipelineSource, sourceExportStatus } from '@/lib/outreach-outbox'
 import { authorizeRequest } from '@/lib/api-auth'
 import { NextRequest, NextResponse } from 'next/server'
 import { classifyGmailError, sendViaGmail, type GmailErrorKind } from '@/lib/gmail'
@@ -104,14 +104,20 @@ function hasMessageId(record: SendRecord): boolean {
 // Map a persisted record to the response the composer expects. A replay never
 // triggers a new send. Definite failures keep their original status, and a row
 // that already has a Gmail message id is reported as sent.
-function recordResponse(record: SendRecord, replayed: boolean): NextResponse {
+async function recordResponse(record: SendRecord, replayed: boolean, owner: string): Promise<NextResponse> {
   if (record.status === 'accepted' || hasMessageId(record)) {
     const outcome = record.status === 'accepted' ? 'accepted' : 'needs_review'
+    let pipelineSynced: boolean | null = null
+    try {
+      const syncStatus = await sourceExportStatus(`immediate:${record.id}`, owner)
+      pipelineSynced = syncStatus === null ? null : syncStatus === 'synced'
+    } catch {}
     return NextResponse.json({
       success: true,
       outcome,
       message_id: record.gmail_message_id,
       replayed,
+      pipeline_synced: pipelineSynced,
     })
   }
   switch (record.status) {
@@ -202,6 +208,13 @@ export async function POST(request: NextRequest) {
     const payloadHash = await sha256Hex(JSON.stringify({
       to, cc: cc ?? '', bcc: bcc ?? '', subject, emailBody, attachments: attachments ?? [],
     }))
+
+    // Freeze export data in the initial record, before acquiring any send claim.
+    // A database outage here can never strand an unattempted message as sending.
+    const pipelinePayload = body.dossier ? pipelineSnapshot({
+      ...body.dossier, to_email: to, lead_source: leadSource ?? 'Outbound', target_role: body.role ?? '',
+      contact_name: contactName ?? '', email_subject: subject, email_body: emailBody, sent_by: session.email,
+    }) : null
 
     const { isVercel, initialiseDb, getLocalDb } = await import('@/lib/db')
     try {
@@ -342,14 +355,14 @@ export async function POST(request: NextRequest) {
         if (existing.payload_hash !== payloadHash) {
           return { action: 'respond', response: NextResponse.json({ error: 'This request id was already used for a different email. Refresh and confirm again as a new send.' }, { status: 409 }) }
         }
-        if (existing.status !== 'recorded') return { action: 'respond', response: recordResponse(existing, true) }
+        if (existing.status !== 'recorded') return { action: 'respond', response: await recordResponse(existing, true, session.googleSub) }
         const claim = await sql`
           UPDATE send_records SET status = 'sending', updated_at = NOW()
           WHERE id = ${existing.id} AND owner_google_sub = ${session.googleSub} AND status = 'recorded'
           RETURNING id`
         if ((claim.rowCount ?? claim.rows.length) === 1) return { action: 'send', recordId: Number(claim.rows[0]?.id ?? existing.id) }
         const current = await loadRecordById(Number(existing.id))
-        if (current) return { action: 'respond', response: recordResponse(current, true) }
+        if (current) return { action: 'respond', response: await recordResponse(current, true, session.googleSub) }
         return { action: 'respond', response: NextResponse.json({ success: false, outcome: 'uncertain', uncertain: true, error: IN_PROGRESS_MESSAGE }, { status: 409 }) }
       }
       const db = getLocalDb()
@@ -361,12 +374,12 @@ export async function POST(request: NextRequest) {
         if (existing.payload_hash !== payloadHash) {
           return { action: 'respond', response: NextResponse.json({ error: 'This request id was already used for a different email. Refresh and confirm again as a new send.' }, { status: 409 }) }
         }
-        if (existing.status !== 'recorded') return { action: 'respond', response: recordResponse(existing, true) }
+        if (existing.status !== 'recorded') return { action: 'respond', response: await recordResponse(existing, true, session.googleSub) }
         const claimed = db.prepare(`UPDATE send_records SET status = 'sending', updated_at = datetime('now')
           WHERE id = ? AND owner_google_sub = ? AND status = 'recorded'`).run(existing.id, session.googleSub)
         if (claimed.changes === 1) return { action: 'send', recordId: Number(existing.id) }
         const current = db.prepare('SELECT id, status, gmail_message_id, last_error_code FROM send_records WHERE id = ? AND owner_google_sub = ?').get(existing.id, session.googleSub) as SendRecord | undefined
-        if (current) return { action: 'respond', response: recordResponse(current, true) }
+        if (current) return { action: 'respond', response: await recordResponse(current, true, session.googleSub) }
         return { action: 'respond', response: NextResponse.json({ success: false, outcome: 'uncertain', uncertain: true, error: IN_PROGRESS_MESSAGE }, { status: 409 }) }
       } finally {
         db.close()
@@ -399,8 +412,8 @@ export async function POST(request: NextRequest) {
       if (isVercel) {
         const { sql } = await import('@vercel/postgres')
         const inserted = await sql`
-          INSERT INTO send_records (owner_google_sub, owner_email, request_id, payload_hash, status)
-          VALUES (${session.googleSub}, ${session.email}, ${requestId}, ${payloadHash}, 'recorded')
+          INSERT INTO send_records (owner_google_sub, owner_email, request_id, payload_hash, status, pipeline_payload)
+          VALUES (${session.googleSub}, ${session.email}, ${requestId}, ${payloadHash}, 'recorded', ${pipelinePayload})
           ON CONFLICT (request_id) DO NOTHING
           RETURNING id`
         follow = (inserted.rowCount ?? inserted.rows.length) === 0
@@ -409,8 +422,8 @@ export async function POST(request: NextRequest) {
       } else {
         const db = getLocalDb()
         try {
-          const inserted = db.prepare(`INSERT INTO send_records (owner_google_sub, owner_email, request_id, payload_hash, status)
-            VALUES (?, ?, ?, ?, 'recorded')`).run(session.googleSub, session.email, requestId, payloadHash)
+          const inserted = db.prepare(`INSERT INTO send_records (owner_google_sub, owner_email, request_id, payload_hash, status, pipeline_payload)
+            VALUES (?, ?, ?, ?, 'recorded', ?)`).run(session.googleSub, session.email, requestId, payloadHash, pipelinePayload)
           follow = await claimNewRow(Number(inserted.lastInsertRowid))
         } catch (insertError) {
           if (!isUniqueViolation(insertError)) throw insertError
@@ -524,29 +537,8 @@ export async function POST(request: NextRequest) {
     const dossier = body.dossier
     let pipelineSynced: boolean | null = null
     if (dossier) {
-      pipelineSynced = false
-      try {
-        await appendPipelineRow({
-            brand_name: dossier.brand_name,
-            website: dossier.website,
-            lead_source: leadSource ?? 'Outbound',
-            revenue_estimate: dossier.revenue_estimate,
-            retailers: dossier.retailers,
-            category: dossier.category,
-            icp_score: dossier.icp_score,
-            score_band: dossier.score_band,
-            signals: dossier.signals,
-            target_role: body.role,
-            contact_name: contactName,
-            email_subject: subject,
-            email_body: emailBody,
-            status: 'Sent',
-            sent_by: session.email
-        })
-        pipelineSynced = true
-      } catch {
-        console.error('Sheets sync failed')
-      }
+      try { pipelineSynced = await syncPipelineSource(`immediate:${recordId}`, session.googleSub) === 'synced' }
+      catch { pipelineSynced = false }
     }
 
     try {

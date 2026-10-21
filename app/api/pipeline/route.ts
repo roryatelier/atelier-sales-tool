@@ -29,7 +29,7 @@ export async function GET(request: Request) {
 
     const response = await sheets.spreadsheets.values.get({
       spreadsheetId: SPREADSHEET_ID,
-      range: 'Sheet1!A:Q'
+      range: 'Sheet1!A:S'
     })
 
     const rows = response.data.values ?? []
@@ -38,12 +38,16 @@ export async function GET(request: Request) {
       return NextResponse.json({ success: true, leads: [], sheet_url: spreadsheetUrl })
     }
 
-    const leads = rows.slice(1)
-      .filter(row => {
+    const exportHeaders = rows[0]?.[17] === 'Outreach ID' && rows[0]?.[18] === 'Recipient Email'
+    const leads = rows.slice(1).map((row,index) => ({ row, index }))
+      .filter(({row}) => {
         const name = (row[0] ?? '').trim()
         return name !== '' && name !== 'Brand Name' && name !== 'brand_name'
       })
-      .map(row => ({
+      .map(({row,index}) => ({
+      pipeline_key: exportHeaders && /^(outreach:[a-f0-9]{32}|(?:immediate|scheduled):[1-9]\d*)$/.test(row[17] ?? '') ? row[17] : `row:${index+2}`,
+      outreach_id: exportHeaders && /^(outreach:[a-f0-9]{32}|(?:immediate|scheduled):[1-9]\d*)$/.test(row[17] ?? '') ? row[17] : '',
+      contact_email: exportHeaders ? row[18] ?? '' : '',
       brand_name: row[0] ?? '',
       website: row[1] ?? '',
       lead_source: row[2] ?? '',

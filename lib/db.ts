@@ -19,9 +19,30 @@ export const SEND_RECORDS_SQLITE_DDL = `CREATE TABLE IF NOT EXISTS send_records 
         created_at TEXT DEFAULT (datetime('now')),
         updated_at TEXT DEFAULT (datetime('now')),
         accepted_at TEXT,
+        pipeline_payload TEXT,
         UNIQUE (request_id),
         CHECK (status != 'accepted' OR (gmail_message_id IS NOT NULL AND gmail_message_id != ''))
       )`
+
+// The trigger runs inside the acceptance write: a committed acceptance cannot
+// lose its export event if the request stops immediately afterwards. No backfill.
+export const OUTREACH_EXPORTS_SQLITE_DDL = `
+CREATE TABLE IF NOT EXISTS outreach_exports (
+  outreach_id TEXT PRIMARY KEY DEFAULT ('outreach:' || lower(hex(randomblob(16)))), source_key TEXT NOT NULL UNIQUE, owner_google_sub TEXT NOT NULL, payload TEXT NOT NULL,
+  gmail_message_id TEXT NOT NULL CHECK(length(trim(gmail_message_id)) > 0),
+  status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','claimed','writing','synced','failed','needs_review')),
+  destination_id TEXT NOT NULL DEFAULT '', claim_token TEXT, claimed_at TEXT, write_intent_at TEXT,
+  next_attempt_at TEXT, attempt_count INTEGER NOT NULL DEFAULT 0, last_error_code TEXT,
+  sheet_range TEXT, accepted_at TEXT NOT NULL, synced_at TEXT
+);
+CREATE TRIGGER IF NOT EXISTS enqueue_immediate_export AFTER UPDATE OF status ON send_records
+WHEN NEW.status IN ('accepted','needs_review') AND NEW.gmail_message_id IS NOT NULL AND length(trim(NEW.gmail_message_id)) > 0 AND NEW.pipeline_payload IS NOT NULL
+BEGIN
+  INSERT INTO outreach_exports(source_key,owner_google_sub,payload,gmail_message_id,accepted_at)
+    VALUES ('immediate:' || NEW.id,NEW.owner_google_sub,NEW.pipeline_payload,NEW.gmail_message_id,COALESCE(NEW.accepted_at,datetime('now')))
+    ON CONFLICT(source_key) DO NOTHING;
+END;
+`
 
 function sqliteSendRecordsReady(sql: string, columns: Set<string>): boolean {
   const normalized = sql.replace(/\s+/g, ' ').toLowerCase()
@@ -118,6 +139,51 @@ export async function initialiseDb() {
     await sql`ALTER TABLE send_records ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW()`
     await sql`ALTER TABLE send_records ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT NOW()`
     await sql`ALTER TABLE send_records ADD COLUMN IF NOT EXISTS accepted_at TIMESTAMP`
+    await sql`ALTER TABLE send_records ADD COLUMN IF NOT EXISTS pipeline_payload TEXT`
+    await sql`ALTER TABLE scheduled_emails ADD COLUMN IF NOT EXISTS pipeline_payload TEXT`
+    await sql`CREATE TABLE IF NOT EXISTS outreach_exports (
+      outreach_id TEXT PRIMARY KEY DEFAULT ('outreach:' || replace(gen_random_uuid()::text,'-','')), source_key TEXT NOT NULL UNIQUE, owner_google_sub TEXT NOT NULL, payload TEXT NOT NULL,
+      gmail_message_id TEXT NOT NULL CHECK(length(trim(gmail_message_id)) > 0),
+      status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','claimed','writing','synced','failed','needs_review')),
+      destination_id TEXT NOT NULL DEFAULT '', claim_token TEXT, claimed_at TIMESTAMPTZ, write_intent_at TIMESTAMPTZ,
+      next_attempt_at TIMESTAMPTZ, attempt_count INTEGER NOT NULL DEFAULT 0, last_error_code TEXT,
+      sheet_range TEXT, accepted_at TIMESTAMPTZ NOT NULL, synced_at TIMESTAMPTZ
+    )`
+    // Install this version once under a transaction-scoped lock. Replacing a
+    // function on every request races concurrent initializations in Postgres.
+    await sql`DO $migration$ BEGIN
+      PERFORM pg_advisory_xact_lock(742091631);
+      IF to_regprocedure('public.enqueue_outreach_export_v2()') IS NULL THEN
+        EXECUTE $function$ CREATE FUNCTION public.enqueue_outreach_export_v2() RETURNS trigger AS $body$
+    BEGIN
+      IF NEW.pipeline_payload IS NOT NULL AND NEW.gmail_message_id IS NOT NULL AND length(trim(NEW.gmail_message_id)) > 0 THEN
+        IF TG_TABLE_NAME = 'send_records' THEN
+          IF NEW.status IN ('accepted','needs_review') THEN
+            INSERT INTO outreach_exports(source_key,owner_google_sub,payload,gmail_message_id,accepted_at)
+            VALUES ('immediate:' || NEW.id,NEW.owner_google_sub,NEW.pipeline_payload,NEW.gmail_message_id,NOW())
+            ON CONFLICT(source_key) DO NOTHING;
+          END IF;
+        ELSE
+          IF NEW.delivery_status = 'sent' THEN
+            INSERT INTO outreach_exports(source_key,owner_google_sub,payload,gmail_message_id,accepted_at)
+            VALUES ('scheduled:' || NEW.id,NEW.owner_google_sub,NEW.pipeline_payload,NEW.gmail_message_id,NOW())
+            ON CONFLICT(source_key) DO NOTHING;
+          END IF;
+        END IF;
+      END IF;
+      RETURN NEW;
+    END;
+        $body$ LANGUAGE plpgsql $function$;
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid = 'public.send_records'::regclass AND tgname = 'enqueue_immediate_export' AND tgfoid = 'public.enqueue_outreach_export_v2()'::regprocedure) THEN
+        DROP TRIGGER IF EXISTS enqueue_immediate_export ON send_records;
+        CREATE TRIGGER enqueue_immediate_export AFTER UPDATE OF status ON send_records FOR EACH ROW EXECUTE FUNCTION public.enqueue_outreach_export_v2();
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid = 'public.scheduled_emails'::regclass AND tgname = 'enqueue_scheduled_export' AND tgfoid = 'public.enqueue_outreach_export_v2()'::regprocedure) THEN
+        DROP TRIGGER IF EXISTS enqueue_scheduled_export ON scheduled_emails;
+        CREATE TRIGGER enqueue_scheduled_export AFTER UPDATE OF delivery_status ON scheduled_emails FOR EACH ROW EXECUTE FUNCTION public.enqueue_outreach_export_v2();
+      END IF;
+    END $migration$`
     // ON CONFLICT (request_id) needs a unique index on that column. An older
     // table created before the constraint existed will not get one from
     // CREATE TABLE IF NOT EXISTS. Fail the init (and therefore the send) if
@@ -223,6 +289,22 @@ export async function initialiseDb() {
       try { db.exec(`ALTER TABLE scheduled_emails ADD COLUMN send_intent_at TEXT`) } catch {}
       try { db.exec(`ALTER TABLE scheduled_emails ADD COLUMN next_attempt_at TEXT`) } catch {}
       ensureSqliteSendRecords(db)
+      for (const table of ['send_records', 'scheduled_emails']) {
+        const columns = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]
+        if (!columns.some(column => column.name === 'pipeline_payload')) db.exec(`ALTER TABLE ${table} ADD COLUMN pipeline_payload TEXT`)
+      }
+      db.transaction(() => {
+        const trigger = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'enqueue_immediate_export'").get() as { sql: string } | undefined
+        if (trigger && !trigger.sql.includes("NEW.status IN ('accepted','needs_review')")) db.exec('DROP TRIGGER enqueue_immediate_export')
+        db.exec(OUTREACH_EXPORTS_SQLITE_DDL)
+      })()
+      db.exec(`CREATE TRIGGER IF NOT EXISTS enqueue_scheduled_export AFTER UPDATE OF delivery_status ON scheduled_emails
+        WHEN NEW.delivery_status = 'sent' AND NEW.gmail_message_id IS NOT NULL AND length(trim(NEW.gmail_message_id)) > 0 AND NEW.pipeline_payload IS NOT NULL
+        BEGIN
+          INSERT INTO outreach_exports(source_key,owner_google_sub,payload,gmail_message_id,accepted_at)
+          VALUES ('scheduled:' || NEW.id,NEW.owner_google_sub,NEW.pipeline_payload,NEW.gmail_message_id,COALESCE(NEW.sent_at,datetime('now')))
+          ON CONFLICT(source_key) DO NOTHING;
+        END;`)
     } finally {
       db.close()
     }

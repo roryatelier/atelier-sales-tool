@@ -1,3 +1,4 @@
+const stopFixtureServer = require('./stop-fixture-server.cjs')
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -90,5 +91,5 @@ test('real contacts and composer: pagination, explicit reveal, manual choice and
     await page.waitForFunction(()=>[...document.querySelectorAll('input')].some(i=>i.value==='work0@example.invalid'));
     assert.equal(await page.getByPlaceholder('Enter email for Contact 0',{exact:true}).inputValue(),'work0@example.invalid');
     assert.deepEqual(errors,[]);
-  }finally{if(browser)await browser.close();server.kill('SIGTERM');log.end();fs.rmSync(fixture,{recursive:true,force:true});}
+  }finally{if(browser)await browser.close();await stopFixtureServer(server);log.end();fs.rmSync(fixture,{recursive:true,force:true,maxRetries:5,retryDelay:100});}
 });

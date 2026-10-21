@@ -18,12 +18,13 @@ function fixture() {
     if (cache.has(filename)) return cache.get(filename)
     const exports = {}; cache.set(filename, exports)
     const source = ts.transpileModule(fs.readFileSync(filename, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText
-    vm.runInNewContext(source, { exports, process: { env: { CRON_SECRET: 'synthetic', GMAIL_CLIENT_ID: 'synthetic', GMAIL_CLIENT_SECRET: 'synthetic' } }, crypto: globalThis.crypto, console, setTimeout, clearTimeout, require: name => {
+    vm.runInNewContext(source, { exports, process: { env: { CRON_SECRET: 'synthetic', GMAIL_CLIENT_ID: 'synthetic', GMAIL_CLIENT_SECRET: 'synthetic' } }, crypto: globalThis.crypto, Date: class extends Date { static now() { return behavior.now ?? Date.now() } }, console, setTimeout, clearTimeout, require: name => {
       if (name === '@/lib/api-auth') return { authorizeRequest: async () => ({ session: { googleSub: 'owner', email: 'owner@example.invalid' } }) }
       if (name === '@/lib/session') return { getGmailCredentials: async () => ({ refreshToken: 'synthetic' }) }
       if (name === '@/lib/db') return { initialiseDb: async () => {}, isVercel: false, getLocalDb: () => new Proxy(db, { get: (target, prop) => prop === 'close' ? () => {} : typeof target[prop] === 'function' ? target[prop].bind(target) : target[prop] }) }
       if (name === '@/lib/auth-policy') return { sealGmailCredentials: async () => 'fresh-synthetic', openGmailCredentials: async () => ({ refreshToken: 'synthetic' }), isAuthorizedEmail: () => true }
       if (name === '@/lib/gmail') return { makeEmailRaw: () => 'synthetic', refreshGmailToken: async () => 'synthetic', refreshScheduledGmailToken: async () => behavior.refresh, sendViaGmail: async () => { calls++; if (behavior.onSend) await behavior.onSend(); if (behavior.sendError) throw behavior.sendError; return 'synthetic-message' } }
+      if (name === '@/lib/outreach-outbox') return { pipelineSnapshot: JSON.stringify, preparePipelineExport: async () => { if (behavior.prepareError) throw new Error('synthetic preparation failure') }, syncPipelineSource: async () => 'synced', processPipelineExports: async () => { if (behavior.exportDelay) behavior.now = Date.now() + behavior.exportDelay } }
       if (name === '@/lib/sheets') return { appendPipelineRow: async () => {} }
       if (name.startsWith('@/')) return load(name.slice(2) + '.ts')
       return require(name)
@@ -154,4 +155,20 @@ test('schedule API binds cancellation and resume to the confirmed account and cu
     const rows = await (await route.GET(new NextRequest('https://example.invalid/api/schedule-email'))).json()
     assert.equal(rows.owner_google_sub, 'owner'); assert.equal(rows.emails.length, 0)
   } finally { f.db.close() }
+})
+
+test('pipeline preparation failures back off before any Gmail send',async()=>{
+ const f=fixture();try{
+  f.seed('pending');f.behavior.prepareError=true;await f.run()
+  const row=f.db.prepare('SELECT * FROM scheduled_emails').get()
+  assert.equal(row.delivery_status,'pending');assert.equal(row.last_error_code,'preparation_failed');assert.equal(row.attempt_count,1);assert.equal(f.calls(),0)
+ }finally{f.db.close()}
+})
+
+test('slow Sheets work leaves scheduled sends pending when execution budget is low',async()=>{
+ const f=fixture();try{
+  f.seed('pending');f.behavior.exportDelay=45000;await f.run()
+  const row=f.db.prepare('SELECT * FROM scheduled_emails').get()
+  assert.equal(row.delivery_status,'pending');assert.equal(row.attempt_count,0);assert.equal(f.calls(),0)
+ }finally{f.db.close()}
 })
