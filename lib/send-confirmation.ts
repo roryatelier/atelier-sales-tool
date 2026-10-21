@@ -23,7 +23,9 @@ export type SendObservation =
 
 const REQUEST_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
-export function confirmedSendDraftKey(draft: ConfirmedSendDraft): string {
+// Serialized content is transient comparison state only. Persist its digest,
+// never duplicate attachment bytes inside a confirmation key.
+export function confirmedSendDraftContent(draft: ConfirmedSendDraft): string {
   return JSON.stringify({
     to: draft.to,
     cc: draft.cc,
@@ -32,6 +34,16 @@ export function confirmedSendDraftKey(draft: ConfirmedSendDraft): string {
     emailBody: draft.emailBody,
     attachments: draft.attachments,
   })
+}
+
+export async function compactConfirmedSendKey(content: string): Promise<string> {
+  if (/^[0-9a-f]{64}$/.test(content)) return content
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(content))
+  return [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('')
+}
+
+export function confirmedSendDraftKey(draft: ConfirmedSendDraft): Promise<string> {
+  return compactConfirmedSendKey(confirmedSendDraftContent(draft))
 }
 
 export function claimConfirmedSendId(
@@ -59,6 +71,8 @@ export function shouldRetainRequestId(observation: SendObservation): boolean {
 
 export interface ConfirmedSendLedger {
   claim(tabId: string, draftKey: string): string
+  adopt(tabId: string, send: RetainedSend): void
+  compact(tabId: string): Promise<void>
   observe(tabId: string, requestId: string, observation: SendObservation): void
   current(tabId: string): RetainedSend | null
   parked(tabId: string): RetainedSend[]
@@ -88,6 +102,25 @@ export function createConfirmedSendLedger(mint: () => string = () => crypto.rand
   }
 
   return {
+    adopt(tabId, send) {
+      if (!rememberable(send)) throw new Error('Invalid send confirmation')
+      park(tabId, send)
+      byTab.set(tabId, send)
+    },
+    async compact(tabId) {
+      const remembered = parkedByTab.get(tabId)
+      if (!remembered) return
+      for (const [oldKey, requestId] of [...remembered]) {
+        const draftKey = await compactConfirmedSendKey(oldKey)
+        if (parkedByTab.get(tabId) !== remembered || remembered.get(oldKey) !== requestId) continue
+        const existing = remembered.get(draftKey)
+        if (existing && existing !== requestId) throw new Error('Conflicting send confirmations need review')
+        remembered.delete(oldKey)
+        remembered.set(draftKey, requestId)
+        const current = byTab.get(tabId)
+        if (current?.requestId === requestId && current.draftKey === oldKey) byTab.set(tabId, { requestId, draftKey })
+      }
+    },
     claim(tabId, draftKey) {
       const current = byTab.get(tabId) ?? null
       if (current && current.draftKey === draftKey && rememberable(current)) {

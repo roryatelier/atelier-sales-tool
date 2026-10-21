@@ -1154,10 +1154,28 @@ test('Postgres outcome writes update only the claimed request id', async () => {
   }
 });
 
-test('the composer keeps confirmed content replayable across uncertainty, acceptance, edits and reload', () => {
+test('confirmation fingerprints are compact, deterministic and bind attachment bytes', async () => {
+  const { confirmedSendDraftKey, confirmedSendDraftContent, createConfirmedSendLedger } = load('lib/send-confirmation.ts');
+  const draft = { to: 'contact@example.invalid', cc: '', bcc: '', subject: 'Hello', emailBody: 'Body', attachments: [{ name: 'fixture.pdf', type: 'application/pdf', data: Buffer.alloc(1536 * 1024, 65).toString('base64') }] };
+  const key = await confirmedSendDraftKey(draft);
+  assert.equal(key.length, 64);
+  assert.match(key, /^[0-9a-f]{64}$/);
+  assert.equal(await confirmedSendDraftKey(draft), key);
+  for (const changed of [{ ...draft, to: 'other@example.invalid' }, { ...draft, cc: 'cc@example.invalid' }, { ...draft, bcc: 'bcc@example.invalid' }, { ...draft, subject: 'Changed' }, { ...draft, emailBody: 'Changed' }, { ...draft, attachments: [{ ...draft.attachments[0], data: 'Qg==' }] }]) {
+    assert.notEqual(await confirmedSendDraftKey(changed), key);
+  }
+  const legacy = createConfirmedSendLedger();
+  const retained = { requestId: '11111111-1111-4111-8111-111111111111', draftKey: confirmedSendDraftContent(draft) };
+  legacy.restore('tab-0', retained);
+  await legacy.compact('tab-0');
+  assert.equal(legacy.claim('tab-0', key), retained.requestId, 'legacy compaction must keep the original request id');
+  assert.equal(legacy.parked('tab-0')[0].draftKey, key);
+});
+
+test('the composer keeps confirmed content replayable across uncertainty, acceptance, edits and reload', async () => {
   const { createConfirmedSendLedger, confirmedSendDraftKey } = load('lib/send-confirmation.ts');
   const draft = { to: 'contact@example.invalid', cc: '', bcc: '', subject: 'Hello', emailBody: 'Body', attachments: [] };
-  const key = confirmedSendDraftKey(draft);
+  const key = await confirmedSendDraftKey(draft);
   let minted = 0;
   const ledger = createConfirmedSendLedger(() => '10000000-0000-4000-8000-00000000000' + (++minted));
   const first = ledger.claim('tab-0', key);
@@ -1170,7 +1188,7 @@ test('the composer keeps confirmed content replayable across uncertainty, accept
   assert.equal(ledger.claim('tab-0', key), first);
   const otherTab = ledger.claim('tab-1', key);
   assert.notEqual(otherTab, first);
-  const changed = confirmedSendDraftKey({ ...draft, subject: 'Changed' });
+  const changed = await confirmedSendDraftKey({ ...draft, subject: 'Changed' });
   const next = ledger.claim('tab-0', changed);
   assert.notEqual(next, first);
   assert.equal(ledger.claim('tab-0', key), first);

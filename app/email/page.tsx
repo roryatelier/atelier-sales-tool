@@ -10,7 +10,8 @@ import {
   generatedDraftProvenance,
   type DraftProvenance,
 } from '@/lib/email-template-provenance'
-import { confirmedSendDraftKey, createConfirmedSendLedger, type RetainedSend } from '@/lib/send-confirmation'
+import { confirmedSendDraftContent, compactConfirmedSendKey, createConfirmedSendLedger, shouldRetainRequestId, type RetainedSend } from '@/lib/send-confirmation'
+import { claimStoredSendId, forgetStoredSendId } from '@/lib/send-confirmation-store'
 
 import React, { useEffect, useLayoutEffect, useState, useRef, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
@@ -99,6 +100,7 @@ interface TabSnapshot {
   parkedSends?: { requestId: string; draftKey: string }[]
   attachments?: { name: string; type: string; data: string }[]
   pipelineSynced?: boolean | null
+  confirmationScope?: string
 }
 
 export default function EmailPage() {
@@ -228,6 +230,7 @@ export default function EmailPage() {
       activeTemplate, draftProvenance, draftInstruction, followUpContext, selectedBullet, outreachTiming,
       pitchAngles, pitchRoles, recommendedRole, selectedPitchRole,
       attachments, pipelineSynced,
+      confirmationScope: tabDataRef.current.get(activeTabIdRef.current)?.confirmationScope ?? crypto.randomUUID(),
       ...retainedSnapshot(activeTabIdRef.current),
     })
   }
@@ -396,6 +399,7 @@ export default function EmailPage() {
             loading: false,
             draftProvenance: t.draftProvenance ?? null,
             draftInstruction: t.draftInstruction ?? '',
+            confirmationScope: t.confirmationScope ?? JSON.stringify(['legacy', parsedDossier.brand_name, t.id]),
           }))
           tabs.forEach(t => {
             tabDataRef.current.set(t.id, t)
@@ -965,7 +969,7 @@ export default function EmailPage() {
   }
 
   function draftKeyForActiveTab(): string {
-    return confirmedSendDraftKey({
+    return confirmedSendDraftContent({
       to: toEmail,
       cc: ccEmail,
       bcc: bccEmail,
@@ -983,18 +987,13 @@ export default function EmailPage() {
     }
     const tabId = activeTabIdRef.current
     const owner = userGoogleSub
-    const draftKey = draftKeyForActiveTab()
-    const requestId = confirmedSendsRef.current.claim(tabId, draftKey)
-    // This write must finish before the network request. A React effect can
-    // lose the race with navigation, reload, or a full browser store.
-    try {
-      saveCurrentTab()
-      persistTabSnapshots()
-    } catch {
-      setError('Could not save this confirmation safely. Free browser storage and try again. This attempt was not sent.')
-      setShowModal(false)
-      return
+    const draftContent = draftKeyForActiveTab()
+    const confirmedDraft = {
+      to: toEmail, cc: ccEmail, bcc: bccEmail, subject: email.subject,
+      emailBody: outboundBody(), attachments: attachments.map(attachment => ({ ...attachment })),
     }
+    let requestId = ''
+    let attempted = false
     sendInFlightRef.current = true
     setSending(true)
     setError('')
@@ -1003,13 +1002,13 @@ export default function EmailPage() {
       if (!mountedRef.current || !matchesDraftIdentity(owner, owner)) return
       const snap = tabDataRef.current.get(tabId)
       const isActive = activeTabIdRef.current === tabId
-      const currentKey = isActive ? activeDraftKeyRef.current : snap?.email ? confirmedSendDraftKey({
+      const currentKey = isActive ? activeDraftKeyRef.current : snap?.email ? confirmedSendDraftContent({
         to: snap.toEmail, cc: snap.ccEmail, bcc: snap.bccEmail,
         subject: snap.email.subject,
         emailBody: appendSignature(snap.email.body, signatureRef.current),
         attachments: snap.attachments ?? [],
       }) : null
-      if (snap && currentKey === draftKey) {
+      if (snap && currentKey === draftContent) {
         tabDataRef.current.set(tabId, { ...snap, ...patch })
         if (isActive) {
           if (patch.error !== undefined) setError(patch.error)
@@ -1026,22 +1025,33 @@ export default function EmailPage() {
     }
 
     try {
+      // Capture the originating tab before the first await. Shared IndexedDB
+      // claims serialize across browser documents; whole draft snapshots may
+      // be overwritten by another document without losing this identity.
+      saveCurrentTab()
+      const confirmationScope = tabDataRef.current.get(tabId)!.confirmationScope!
+      const metadata = {
+        expectedGoogleSub: owner, contactName: contact?.name ?? '', role: selectedRole,
+        leadSource: userStorage.getItem('lead_source') ?? 'Outbound',
+        senderName: userStorage.getItem('atelier_user_name') ?? '', dossier,
+      }
+      for (const id of tabDataRef.current.keys()) await confirmedSendsRef.current.compact(id)
+      const draftKey = await compactConfirmedSendKey(draftContent)
+      const storedDraftScope = await compactConfirmedSendKey(confirmationScope)
+      if (!mountedRef.current || !matchesDraftIdentity(owner, owner)) return
+      const preferred = confirmedSendsRef.current.claim(tabId, draftKey)
+      requestId = await claimStoredSendId(owner, storedDraftScope, draftKey, preferred)
+      if (!mountedRef.current || !matchesDraftIdentity(owner, owner)) return
+      confirmedSendsRef.current.adopt(tabId, { requestId, draftKey })
+      persistTabSnapshots()
+      attempted = true
       const res = await fetch('/api/send-email', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          to: toEmail,
-          cc: ccEmail,
-          bcc: bccEmail,
-          subject: email.subject,
-          emailBody: outboundBody(),
-          expectedGoogleSub: userGoogleSub,
-          contactName: contact?.name ?? '',
-          role: selectedRole,
-          leadSource: userStorage.getItem('lead_source') ?? 'Outbound',
-          senderName: userStorage.getItem('atelier_user_name') ?? '',
-          dossier,
-          attachments: attachments.length > 0 ? attachments : undefined,
+          ...metadata,
+          ...confirmedDraft,
+          attachments: confirmedDraft.attachments.length > 0 ? confirmedDraft.attachments : undefined,
           request_id: requestId,
         })
       })
@@ -1056,13 +1066,21 @@ export default function EmailPage() {
       }
 
       if (!mountedRef.current || !matchesDraftIdentity(owner, owner)) return
-      confirmedSendsRef.current.observe(tabId, requestId, {
-        kind: 'response',
+      const observation = {
+        kind: 'response' as const,
         httpStatus: res.status,
         success: data.success === true,
         uncertain: data.uncertain === true,
         outcome: typeof data.outcome === 'string' ? data.outcome : undefined,
-      })
+      }
+      // Never discard shared identity on an unclassified replay failure. A
+      // failed cleanup also keeps it, so a late reply cannot unlock a resend.
+      let observed = true
+      if (!observation.success && !shouldRetainRequestId(observation)) {
+        try { await forgetStoredSendId(owner, storedDraftScope, draftKey, requestId) } catch { observed = false }
+      }
+      if (!mountedRef.current || !matchesDraftIdentity(owner, owner)) return
+      if (observed) confirmedSendsRef.current.observe(tabId, requestId, observation)
 
       if (data.reauth) { applyResult({ needsAuth: true }); return }
       if (!res.ok || !data.success) { applyResult({ error: typeof data.error === 'string' ? data.error : 'Gmail did not confirm this send. Check Sent mail before trying again.' }); return }
@@ -1086,7 +1104,9 @@ export default function EmailPage() {
         console.error('Follow-up pipeline update unavailable after send')
       }
     } catch {
-      applyResult({ error: 'Gmail did not confirm this send. Check Sent mail before trying again.' })
+      applyResult({ error: attempted
+        ? 'Gmail did not confirm this send. Check Sent mail before trying again.'
+        : 'Could not save this confirmation safely. Free browser storage and try again. This attempt was not sent.' })
     } finally {
       sendInFlightRef.current = false
       if (mountedRef.current) setSending(false)

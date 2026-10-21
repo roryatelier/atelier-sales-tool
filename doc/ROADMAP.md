@@ -54,6 +54,9 @@ accepted/failed/review outcomes, and replay without another Gmail call. The
 composer saves the confirmation before contacting the server, restores each
 tab's attachments and request identity after reload, and routes late outcomes
 to the originating draft. Browser storage failure blocks that attempt.
+Atomic IndexedDB claims share identities across browser documents for the same
+saved draft. Draft fingerprints use SHA-256 instead of copying attachment data
+into confirmation keys. Stale snapshot writes cannot erase shared identities.
 
 Review corrections also repair earlier SQLite send-record schemas without
 discarding valid records; incompatible records fail closed. Disposable native

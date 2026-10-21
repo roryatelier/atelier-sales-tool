@@ -13,7 +13,7 @@ test('save a signature, generate, regenerate, and preview the same signature on 
   const root = path.resolve(__dirname, '..')
   const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'atelier-signature-ui-'))
   const tracked = execFileSync('git', ['ls-files', '-z'], { cwd: root }).toString().split('\0').filter(Boolean)
-  const extra = ['lib/email-signature.ts', 'lib/email-signature-store.ts', 'app/api/signature/route.ts']
+  const extra = ['lib/email-signature.ts', 'lib/email-signature-store.ts', 'app/api/signature/route.ts', 'lib/send-confirmation-store.ts']
   for (const relative of [...new Set([...tracked, ...extra])]) {
     if (relative.startsWith('tests/') || relative.startsWith('.env') || relative === 'atelier.db' || relative.includes('service-account')) continue
     const file = path.join(root, relative)
@@ -182,10 +182,23 @@ test('save a signature, generate, regenerate, and preview the same signature on 
     assert.match(scheduled[0].body, /Draft \d+/)
 
     await page.getByRole('tab', { name: /Fixture Brand · Fixture/ }).click()
-    await page.locator('input[type="file"]').setInputFiles({ name: 'fixture.txt', mimeType: 'text/plain', buffer: Buffer.from('Fixture attachment') })
+    await page.locator('input[type="file"]').setInputFiles({ name: 'fixture.txt', mimeType: 'text/plain', buffer: Buffer.alloc(1536 * 1024, 65) })
+    await page.getByText('fixture.txt', { exact: true }).waitFor()
+    const stalePage = await context.newPage()
+    await stalePage.goto('http://localhost:3174/email')
+    await stalePage.locator('textarea').waitFor()
+    const staleSubject = stalePage.locator('label.field-label', { hasText: /^Subject$/ }).locator('..').locator('input')
+    const originalSubject = await staleSubject.inputValue()
     await page.getByRole('button', { name: 'Send email' }).click()
     await page.locator('.modal-foot').getByRole('button', { name: 'Confirm send' }).click()
     await page.getByText('This send is in progress or its outcome was not confirmed. Check Sent mail before retrying.').waitFor()
+    const confirmed = await page.evaluate(() => JSON.parse(localStorage.getItem('atelier:draft:v2:owner-sig:email_tabs')).tabs.find(tab => tab.confirmedRequestId))
+    assert.match(confirmed.confirmedDraftKey, /^[0-9a-f]{64}$/)
+    assert.ok(confirmed.parkedSends.every(send => send.draftKey.length === 64))
+    await staleSubject.fill('Stale browser edit')
+    await staleSubject.fill(originalSubject)
+    await stalePage.waitForFunction(subject => JSON.parse(localStorage.getItem('atelier:draft:v2:owner-sig:email_tabs')).tabs.some(tab => tab.email?.subject === subject && !tab.confirmedRequestId), originalSubject)
+    await stalePage.close()
     // Reload without any intervening draft edit: the confirmed id must already
     // be durable, and the exact payload (including attachments) must survive.
     await page.reload()
@@ -223,6 +236,15 @@ test('save a signature, generate, regenerate, and preview the same signature on 
     const nextSubject = page.locator('label.field-label', { hasText: /^Subject$/ }).locator('..').locator('input')
     await nextSubject.fill('Delayed fixture subject')
     await page.evaluate(() => {
+      window.originalIndexedDbOpen = IDBFactory.prototype.open
+      IDBFactory.prototype.open = function() { throw new DOMException('Fixture denied', 'SecurityError') }
+    })
+    await page.getByRole('button', { name: 'Send email' }).click()
+    await page.locator('.modal-foot').getByRole('button', { name: 'Confirm send' }).click()
+    await page.getByText('Could not save this confirmation safely. Free browser storage and try again. This attempt was not sent.').waitFor()
+    assert.equal(sent.length, 3, 'IndexedDB failure must prevent sending')
+    await page.evaluate(() => { IDBFactory.prototype.open = window.originalIndexedDbOpen })
+    await page.evaluate(() => {
       window.originalStorageSetItem = Storage.prototype.setItem
       Storage.prototype.setItem = function(key, value) {
         if (key.endsWith(':email_tabs')) throw new DOMException('Fixture quota', 'QuotaExceededError')
@@ -257,6 +279,28 @@ test('save a signature, generate, regenerate, and preview the same signature on 
     await page.getByText('Gmail accepted this email, but pipeline sync could not be confirmed. Check the pipeline separately; do not resend the email.').waitFor()
     await page.reload()
     await page.getByText('Email sent successfully').waitFor()
+
+    // Exercise the real shared store from two independent documents. Claims
+    // serialize, and an outdated refusal must not delete a newer identity.
+    const storeSource = require('typescript').transpileModule(fs.readFileSync(path.join(root, 'lib/send-confirmation-store.ts'), 'utf8'), { compilerOptions: { module: require('typescript').ModuleKind.CommonJS, target: require('typescript').ScriptTarget.ES2020 } }).outputText
+    const otherDocument = await context.newPage()
+    await otherDocument.goto('http://localhost:3174/email')
+    for (const document of [page, otherDocument]) await document.evaluate(source => {
+      const exported = {}
+      new Function('exports', source)(exported)
+      window.storeForTest = exported
+    }, storeSource)
+    const identity = ['fixture-concurrency-owner', 'shared-tab', 'a'.repeat(64)]
+    const ids = await Promise.all([
+      page.evaluate(args => window.storeForTest.claimStoredSendId(...args, '11111111-1111-4111-8111-111111111111'), identity),
+      otherDocument.evaluate(args => window.storeForTest.claimStoredSendId(...args, '22222222-2222-4222-8222-222222222222'), identity),
+    ])
+    assert.equal(ids[0], ids[1], 'concurrent documents must share one identity')
+    await otherDocument.evaluate(args => window.storeForTest.forgetStoredSendId(...args, '33333333-3333-4333-8333-333333333333'), identity)
+    assert.equal(await page.evaluate(args => window.storeForTest.claimStoredSendId(...args, '44444444-4444-4444-8444-444444444444'), identity), ids[0])
+    await page.evaluate(args => window.storeForTest.forgetStoredSendId(...args), [...identity, ids[0]])
+    assert.equal(await page.evaluate(args => window.storeForTest.claimStoredSendId(...args, '44444444-4444-4444-8444-444444444444'), identity), '44444444-4444-4444-8444-444444444444')
+    await otherDocument.close()
     assert.deepEqual(errors, [])
   } finally {
     if (browser) await browser.close()
