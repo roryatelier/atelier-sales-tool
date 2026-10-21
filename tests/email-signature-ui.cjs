@@ -1,3 +1,4 @@
+const stopFixtureServer = require('./stop-fixture-server.cjs')
 const test = require('node:test')
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
@@ -313,9 +314,9 @@ test('save a signature, generate, regenerate, and preview the same signature on 
     assert.deepEqual(errors, [])
   } finally {
     if (browser) await browser.close()
-    server.kill('SIGTERM')
+    await stopFixtureServer(server)
     log.end()
-    fs.rmSync(fixture, { recursive: true, force: true })
+    fs.rmSync(fixture, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
   }
 })
 

@@ -1,3 +1,4 @@
+const stopFixtureServer = require('./stop-fixture-server.cjs')
 const test = require('node:test')
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
@@ -102,5 +103,5 @@ test('pipeline retries never send email and edits target a specific outreach', {
     await sync.getByText('Your account changed. Reload before continuing.').waitFor()
     assert.equal(await sync.locator('article').count(),0)
 
-  } finally { if (browser) await browser.close(); server.kill('SIGTERM'); fs.rmSync(fixture, { recursive: true, force: true }) }
+  } finally { if (browser) await browser.close(); await stopFixtureServer(server); fs.rmSync(fixture, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }) }
 })
