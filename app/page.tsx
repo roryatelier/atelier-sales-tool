@@ -1,5 +1,7 @@
 'use client'
 
+import ScheduledSends from './components/ScheduledSends'
+
 import { userStorage } from '@/lib/browser-storage'
 
 import { useState, useEffect } from 'react'
@@ -139,8 +141,6 @@ export default function Dashboard() {
   const [userName, setUserName] = useState('')
   const [activityItems, setActivityItems] = useState<ActivityItem[]>([])
   const [loadingActivity, setLoadingActivity] = useState(false)
-  const [scheduledEmails, setScheduledEmails] = useState<{id: number; to_email: string; subject: string; brand_name: string; contact_name: string; scheduled_at: string; timezone?: string; delivery_status?: 'pending' | 'sending' | 'needs_reauth' | 'needs_review'; last_error_code?: string}[]>([])
-  const [scheduledSendingPaused, setScheduledSendingPaused] = useState(false)
   const [timeFilter, setTimeFilter] = useState<TimeFilter>('All Time')
   const [userFilter, setUserFilter] = useState<string>('All')
   const [activityExpanded, setActivityExpanded] = useState(true)
@@ -159,18 +159,12 @@ export default function Dashboard() {
     }).catch(() => {})
     async function init() {
       try {
-        const [pipelineRes, savedRes, scheduledRes] = await Promise.all([
+        const [pipelineRes, savedRes] = await Promise.all([
           fetch('/api/pipeline'),
           fetch('/api/saved-suggestions'),
-          fetch('/api/schedule-email'),
         ])
         const pipelineData = await pipelineRes.json()
         const savedData = await savedRes.json()
-        const scheduledData = await scheduledRes.json()
-        if (scheduledData.success) {
-          setScheduledEmails(scheduledData.emails ?? [])
-          setScheduledSendingPaused(scheduledData.paused === true)
-        }
         if (pipelineData.success) {
           setLeads(pipelineData.leads)
           if (pipelineData.leads.length === 0) setShowOnboarding(true)
@@ -219,16 +213,10 @@ export default function Dashboard() {
   useEffect(() => {
     async function fetchPipeline() {
       try {
-        const [pipelineRes, scheduledRes] = await Promise.all([
+        const [pipelineRes] = await Promise.all([
           fetch('/api/pipeline'),
-          fetch('/api/schedule-email'),
         ])
         const pipelineData = await pipelineRes.json()
-        const scheduledData = await scheduledRes.json()
-        if (scheduledData.success) {
-          setScheduledEmails(scheduledData.emails ?? [])
-          setScheduledSendingPaused(scheduledData.paused === true)
-        }
         if (pipelineData.success) setLeads(pipelineData.leads)
       } catch {}
     }
@@ -845,49 +833,7 @@ export default function Dashboard() {
               </div>
             </div>
 
-            {/* Scheduled sends */}
-            <div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}>
-                <div className="section-label" style={{ margin: 0, color: '#050849' }}>🕐 Scheduled sends</div>
-                {scheduledEmails.length > 0 && (
-                  <span style={{ fontSize: 11, fontWeight: 500, background: '#050849', color: '#fff', borderRadius: 10, padding: '1px 7px' }}>{scheduledEmails.length}</span>
-                )}
-              </div>
-              <div className="dash-right-scroll" style={{ maxHeight: 200, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 8 }}>
-                {scheduledSendingPaused ? (
-                  <div role="status" style={{ fontSize: 13, padding: '12px 0' }}>Scheduled sending is temporarily paused. Existing jobs are preserved for review.</div>
-                ) : scheduledEmails.length === 0 ? (
-                  <div style={{ fontSize: 13, color: 'var(--slate-300)', padding: '12px 0' }}>No scheduled sends</div>
-                ) : scheduledEmails.map(e => (
-                  <div key={e.id} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 14px', background: '#f0f0ff', border: '1px solid #d0d0ee', borderRadius: 'var(--radius-md)', flexShrink: 0 }}>
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-default)', marginBottom: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {e.brand_name || e.to_email}
-                      </div>
-                      <div style={{ fontSize: 11, color: 'var(--slate-500)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        To: {e.to_email}{e.contact_name ? ` · ${e.contact_name}` : ''}
-                      </div>
-                      <div style={{ fontSize: 11, fontWeight: 500, color: '#050849', marginTop: 2 }}>
-                        📅 {new Date(e.scheduled_at).toLocaleString('en-AU', { weekday: 'short', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' })} {(() => { try { return new Intl.DateTimeFormat('en-AU', { timeZone: e.timezone ?? 'Australia/Sydney', timeZoneName: 'short' }).formatToParts(new Date(e.scheduled_at)).find(p => p.type === 'timeZoneName')?.value ?? 'AEST' } catch { return 'AEST' } })()}
-                      </div>
-                      {e.delivery_status === 'needs_reauth' && <div role="alert" style={{ fontSize: 11, color: 'var(--red-500)', marginTop: 3 }}>Not sent — reconnect Gmail, then schedule again.</div>}
-                      {e.delivery_status === 'needs_review' && <div role="alert" style={{ fontSize: 11, color: 'var(--red-500)', marginTop: 3 }}>Delivery uncertain — check Gmail Sent before trying again.</div>}
-                      {e.delivery_status === 'sending' && <div role="status" style={{ fontSize: 11, color: '#050849', marginTop: 3 }}>Sending now…</div>}
-                    </div>
-                    {(!e.delivery_status || e.delivery_status === 'pending') && <button
-                      onClick={async () => {
-                        await fetch(`/api/schedule-email?id=${e.id}`, { method: 'DELETE' })
-                        setScheduledEmails(prev => prev.filter(x => x.id !== e.id))
-                      }}
-                      className="btn btn-ghost btn-sm"
-                      style={{ flexShrink: 0, color: 'var(--red-500)', borderColor: 'var(--red-300)' }}
-                    >
-                      Cancel
-                    </button>}
-                  </div>
-                ))}
-              </div>
-            </div>
+            <ScheduledSends />
 
           </div>{/* end right */}
         </div>{/* end split pane row */}

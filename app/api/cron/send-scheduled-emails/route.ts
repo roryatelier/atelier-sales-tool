@@ -1,65 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { initialiseDb, isVercel, getLocalDb } from '@/lib/db'
-import { openGmailCredentials } from '@/lib/auth-policy'
-import { makeEmailRaw, refreshGmailToken, sendViaGmail } from '@/lib/gmail'
+import { openGmailCredentials, isAuthorizedEmail } from '@/lib/auth-policy'
+import { makeEmailRaw, refreshScheduledGmailToken, sendViaGmail } from '@/lib/gmail'
 import { appendPipelineRow } from '@/lib/sheets'
 
-interface ScheduledEmail {
-  id: number
-  to_email: string
-  cc: string
-  bcc: string
-  subject: string
-  body: string
-  brand_name: string
-  contact_name: string
-  owner_google_sub: string
-  owner_email: string
-  credential_ciphertext: string
-  dossier_json: string
-}
-
-async function claimNext(): Promise<ScheduledEmail | null> {
-  if (isVercel) {
-    const { sql } = await import('@vercel/postgres')
-    const result = await sql`WITH candidate AS (
-      SELECT id FROM scheduled_emails
-      WHERE delivery_status = 'pending' AND scheduled_at <= NOW()
-      ORDER BY scheduled_at ASC FOR UPDATE SKIP LOCKED LIMIT 1
-    )
-    UPDATE scheduled_emails AS job
-      SET delivery_status = 'sending', claimed_at = NOW(), attempt_count = COALESCE(attempt_count, 0) + 1
-      FROM candidate WHERE job.id = candidate.id
-      RETURNING job.*`
-    return (result.rows[0] as unknown as ScheduledEmail | undefined) ?? null
-  }
-  const db = getLocalDb()
-  const claim = db.transaction(() => {
-    const row = db.prepare(`SELECT * FROM scheduled_emails WHERE delivery_status = 'pending' AND scheduled_at <= datetime('now') ORDER BY scheduled_at ASC LIMIT 1`).get() as ScheduledEmail | undefined
-    if (!row) return null
-    const updated = db.prepare(`UPDATE scheduled_emails SET delivery_status = 'sending', claimed_at = datetime('now'), attempt_count = COALESCE(attempt_count, 0) + 1 WHERE id = ? AND delivery_status = 'pending'`).run(row.id)
-    return updated.changes === 1 ? row : null
-  })
-  return claim()
-}
-
-async function setFailure(id: number, status: 'needs_reauth' | 'needs_review', code: string) {
-  if (isVercel) {
-    const { sql } = await import('@vercel/postgres')
-    await sql`UPDATE scheduled_emails SET delivery_status = ${status}, last_error_code = ${code} WHERE id = ${id} AND delivery_status = 'sending'`
-  } else {
-    getLocalDb().prepare(`UPDATE scheduled_emails SET delivery_status = ?, last_error_code = ? WHERE id = ? AND delivery_status = 'sending'`).run(status, code, id)
-  }
-}
-
-async function setSent(id: number, messageId: string) {
-  if (isVercel) {
-    const { sql } = await import('@vercel/postgres')
-    await sql`UPDATE scheduled_emails SET delivery_status = 'sent', sent = true, sent_at = NOW(), gmail_message_id = ${messageId}, last_error_code = NULL WHERE id = ${id} AND delivery_status = 'sending'`
-  } else {
-    getLocalDb().prepare(`UPDATE scheduled_emails SET delivery_status = 'sent', sent = 1, sent_at = datetime('now'), gmail_message_id = ?, last_error_code = NULL WHERE id = ? AND delivery_status = 'sending'`).run(messageId, id)
-  }
-}
+import { claimNext, recoverScheduledEmails, beginScheduledSend, failScheduledSend, acceptScheduledSend, type ScheduledEmail } from '@/lib/scheduled-email-store'
 
 async function recordHistory(email: ScheduledEmail) {
   try {
@@ -67,7 +12,8 @@ async function recordHistory(email: ScheduledEmail) {
       const { sql } = await import('@vercel/postgres')
       await sql`INSERT INTO contact_history (brand_name, contact_role, contact_name, contact_email, method) VALUES (${email.brand_name}, '', ${email.contact_name}, ${email.to_email}, 'email')`
     } else {
-      getLocalDb().prepare(`INSERT INTO contact_history (brand_name, contact_role, contact_name, contact_email, method) VALUES (?, '', ?, ?, 'email')`).run(email.brand_name, email.contact_name, email.to_email)
+      const db = getLocalDb()
+      try { db.prepare(`INSERT INTO contact_history (brand_name, contact_role, contact_name, contact_email, method) VALUES (?, '', ?, ?, 'email')`).run(email.brand_name, email.contact_name, email.to_email) } finally { db.close() }
     }
   } catch { console.error('Scheduled contact history sync failed') }
 }
@@ -102,8 +48,9 @@ export async function GET(request: NextRequest) {
   if (!process.env.GMAIL_CLIENT_ID || !process.env.GMAIL_CLIENT_SECRET) return NextResponse.json({ error: 'Gmail configuration unavailable' }, { status: 503 })
   try { await initialiseDb() } catch { return NextResponse.json({ error: 'Database unavailable' }, { status: 503 }) }
 
+  const recovery = await recoverScheduledEmails()
   let sent = 0
-  let needsReview = 0
+  let needsReview = recovery.needs_review
   let needsReauth = 0
   for (let processed = 0; processed < 20; processed++) {
     const email = await claimNext()
@@ -111,27 +58,33 @@ export async function GET(request: NextRequest) {
     const owner = { googleSub: email.owner_google_sub, email: email.owner_email }
     const credentials = email.credential_ciphertext ? await openGmailCredentials(email.credential_ciphertext, owner) : null
     if (!credentials?.refreshToken) {
-      await setFailure(email.id, 'needs_reauth', 'credentials_unavailable')
+      await failScheduledSend(email, 'needs_reauth', 'credentials_unavailable')
       needsReauth++
       continue
     }
-    const accessToken = await refreshGmailToken(credentials.refreshToken)
-    if (!accessToken) {
-      await setFailure(email.id, 'needs_reauth', 'token_refresh_failed')
-      needsReauth++
+    const refresh = await refreshScheduledGmailToken(credentials.refreshToken)
+    if (!refresh.accessToken) {
+      await failScheduledSend(email, refresh.reauth ? 'needs_reauth' : 'pending', refresh.reauth ? 'token_refresh_rejected' : 'token_refresh_unavailable')
+      if (refresh.reauth) needsReauth++
       continue
     }
     try {
       const raw = makeEmailRaw(email.to_email, email.subject, email.body, email.cc || undefined, email.bcc || undefined)
-      const messageId = await sendViaGmail(accessToken, raw)
+      if (!isAuthorizedEmail(email.owner_email)) {
+        await failScheduledSend(email, 'needs_reauth', 'owner_not_authorized')
+        needsReauth++
+        continue
+      }
+      if (!await beginScheduledSend(email)) continue
+      const messageId = await sendViaGmail(refresh.accessToken, raw)
       if (!messageId) throw new Error('missing_message_id')
-      await setSent(email.id, messageId)
+      await acceptScheduledSend(email, messageId)
       sent++
       await recordHistory(email)
       await syncPipeline(email)
     } catch {
       // A failed Gmail request can be ambiguous. Never retry it automatically.
-      await setFailure(email.id, 'needs_review', 'gmail_send_ambiguous')
+      await failScheduledSend(email, 'needs_review', 'gmail_send_ambiguous')
       needsReview++
     }
   }
@@ -146,11 +99,14 @@ export async function GET(request: NextRequest) {
     const stateRows = await sql`SELECT delivery_status, COUNT(*)::int AS count FROM scheduled_emails GROUP BY delivery_status ORDER BY delivery_status`
     states = Object.fromEntries(stateRows.rows.map(row => [String(row.delivery_status ?? 'unknown'), Number(row.count)]))
   } else {
-    const queue = getLocalDb().prepare(`SELECT COUNT(*) AS pending, MIN(scheduled_at) AS next_due FROM scheduled_emails WHERE delivery_status = 'pending'`).get() as { pending: number; next_due: string | null }
-    pending = queue.pending
-    nextDue = queue.next_due ? new Date(queue.next_due).toISOString() : null
-    const stateRows = getLocalDb().prepare(`SELECT delivery_status, COUNT(*) AS count FROM scheduled_emails GROUP BY delivery_status ORDER BY delivery_status`).all() as { delivery_status: string | null; count: number }[]
-    states = Object.fromEntries(stateRows.map(row => [row.delivery_status ?? 'unknown', Number(row.count)]))
+    const db = getLocalDb()
+    try {
+      const queue = db.prepare(`SELECT COUNT(*) AS pending, MIN(scheduled_at) AS next_due FROM scheduled_emails WHERE delivery_status = 'pending'`).get() as { pending: number; next_due: string | null }
+      pending = queue.pending
+      nextDue = queue.next_due ? new Date(queue.next_due).toISOString() : null
+      const stateRows = db.prepare(`SELECT delivery_status, COUNT(*) AS count FROM scheduled_emails GROUP BY delivery_status ORDER BY delivery_status`).all() as { delivery_status: string | null; count: number }[]
+      states = Object.fromEntries(stateRows.map(row => [row.delivery_status ?? 'unknown', Number(row.count)]))
+    } finally { db.close() }
   }
-  return NextResponse.json({ success: true, sent, needs_review: needsReview, needs_reauth: needsReauth, pending, next_due: nextDue, checked_at: new Date().toISOString(), database: isVercel ? 'postgres' : 'local', states })
+  return NextResponse.json({ success: true, recovered: recovery.recovered, sent, needs_review: needsReview, needs_reauth: needsReauth, pending, next_due: nextDue, checked_at: new Date().toISOString(), database: isVercel ? 'postgres' : 'local', states })
 }

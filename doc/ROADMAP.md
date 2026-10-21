@@ -134,14 +134,36 @@ What is on `main`:
 - The dashboard lists pending, sending, needs_reauth, and needs_review for the signed-in owner. `paused` is false.
 - Local time conversion rejects a wall-clock time that does not exist in the chosen zone.
 
-What the durable-sending spec still requires:
+Recovery patch prepared for review (21 October 2026):
 
-- One job model shared by immediate and scheduled sends, with idempotency key, payload hash, and a frozen recipient snapshot.
-- Explicit states for queued, claimed, sending, accepted, failed, needs_auth, cancelled, and ambiguous, including the case where Gmail may have accepted the message and the database write did not.
-- A lease that cannot cause a second send after a durable send intent.
-- The same MIME builder for both paths. Immediate send is HTML plus attachments (`app/api/send-email/route.ts`). Scheduled send uses the plain-text builder in `lib/gmail.ts`.
-- Cancellation rules for a job already claimed, an overdue-job alert independent of the cron ping, and a documented decision before any quarantined row is activated.
-- The cron schedule in `vercel.json` is every 15 minutes. Whether the live Vercel plan allows that interval is an operator check, not something the repo can prove.
+- Token-bound `claimed` preparation precedes durable `sending` intent. After five
+  minutes, interrupted preparation can return to pending; a send attempt becomes
+  `needs_review` and never automatically retries. A late Gmail id can resolve only
+  that original attempt. Legacy quarantined jobs remain untouched.
+- Cancellation atomically fences pending/preparing jobs before intent. Only the
+  owner may explicitly resume a pre-intent `needs_reauth` job using freshly verified
+  credentials. Recipients, message and scheduled time remain unchanged.
+- Token-refresh outages back off before intent; a revoked grant needs reconnection.
+  SQLite normalizes schedule timestamps before comparing them with the clock.
+- The dashboard refreshes independently of pipeline/cron responses, flags jobs over
+  30 minutes late, preserves failed actions, and checks the captured browser owner.
+- SQLite regressions and browser scenarios cover recovery, fencing, uncertainty,
+  cancellation, explicit resume, account changes, refresh races and timezone display.
+  Disposable native PostgreSQL verification covers the actual schema and store SQL,
+  concurrent claims/workers and lost write acknowledgments with synthetic providers.
+  These checks do not prove Neon transport or live Gmail acceptance.
+
+Remaining work:
+
+- A shared immediate/scheduled job model with schedule-request idempotency and frozen
+  revisions. This patch does not deduplicate repeated schedule submissions.
+- Durable Sheets sync status/outbox and recovery after a crash following Gmail
+  acceptance. Retrying export must never send Gmail again.
+- External monitoring/alerts when nobody has the dashboard open. The overdue warning
+  is polled by the dashboard; it is not an installed independent uptime monitor.
+- Verify the live Vercel plan permits the configured 15-minute interval. Recovery
+  runs on the next successful worker invocation, not a separate timer.
+- Human review before activating any quarantined row. None are activated here.
 
 ### Draft handoff
 
