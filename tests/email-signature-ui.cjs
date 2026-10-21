@@ -67,6 +67,8 @@ test('save a signature, generate, regenerate, and preview the same signature on 
     const sent = []
     const scheduled = []
     let releaseDelayedSend
+    let markDelayedSendStarted
+    const delayedSendStarted = new Promise(resolve => { markDelayedSendStarted = resolve })
     await page.route('**/api/send-email', async route => {
       sent.push(route.request().postDataJSON())
       if (sent.length === 1) {
@@ -81,7 +83,10 @@ test('save a signature, generate, regenerate, and preview the same signature on 
         await route.abort('failed')
         return
       }
-      if (sent.length === 4) await new Promise(resolve => { releaseDelayedSend = resolve })
+      if (sent.length === 4) await new Promise(resolve => {
+        releaseDelayedSend = resolve
+        markDelayedSendStarted()
+      })
       await route.fulfill({ json: { success: true, outcome: 'accepted', message_id: 'fixture-message', ...(sent.length === 4 ? { replayed: true } : { pipeline_synced: true }) } })
     })
     await page.route('**/api/schedule-email', async route => {
@@ -260,9 +265,8 @@ test('save a signature, generate, regenerate, and preview the same signature on 
     // Keep A's request pending while switching to B. A's late acceptance must
     // update A alone, and attachments must not leak into this new draft.
     await page.getByRole('button', { name: 'Send email' }).click()
-    const delayedRequest = page.waitForRequest(request => request.url().endsWith('/api/send-email'))
     await page.locator('.modal-foot').getByRole('button', { name: 'Confirm send' }).click()
-    await delayedRequest
+    await delayedSendStarted
     assert.equal(sent[3].attachments, undefined, 'attachments belong to their original draft tab')
     await page.locator('.modal-foot').getByRole('button', { name: 'Cancel' }).click()
     await page.getByRole('button', { name: 'New email tab' }).click()

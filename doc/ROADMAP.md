@@ -47,9 +47,9 @@ before PRs #8–#11; this update takes precedence where they differ.
 5. **Release health.** A public health response and a post-deploy canary are not in the repo. CI `verify` does not call live providers.
 6. **Remaining doc drift** in handover and prompt notes, without copying prospect or operator data into the repo.
 
-### PR #13: immediate-send retries (prepared, not merged)
+### Immediate-send retries (#13)
 
-The PR adds durable send records, payload-bound request IDs, atomic claims,
+The implementation adds durable send records, payload-bound request IDs, atomic claims,
 accepted/failed/review outcomes, and replay without another Gmail call. The
 composer saves the confirmation before contacting the server, restores each
 tab's attachments and request identity after reload, and routes late outcomes
