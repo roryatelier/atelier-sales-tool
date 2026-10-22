@@ -193,3 +193,55 @@ function htmlFromRaw(raw) {
   assert.ok(part)
   return { headers, html: Buffer.from(part[1].replace(/\r\n/g, ''), 'base64').toString('utf8') }
 }
+
+test('signature editor button state distinguishes empty, saved and edited states', () => {
+  const max = 4000
+  // Nothing saved, empty editor: prompt to save, disabled, empty-state hint visible
+  let state = content.signatureEditorState({ loaded: true, saving: false, signature: '', savedSignature: '', maxLength: max })
+  assert.equal(state.label, 'Save signature')
+  assert.equal(state.disabled, true)
+  assert.equal(state.showEmptyHint, true)
+
+  // Nothing saved, text entered: save enabled, hint still visible (nothing persisted yet)
+  state = content.signatureEditorState({ loaded: true, saving: false, signature: 'Thanks,\nFixture', savedSignature: '', maxLength: max })
+  assert.equal(state.label, 'Save signature')
+  assert.equal(state.disabled, false)
+  assert.equal(state.showEmptyHint, true)
+
+  // Saved and unchanged: shows Saved, disabled, no hint
+  state = content.signatureEditorState({ loaded: true, saving: false, signature: 'Thanks,\nFixture', savedSignature: 'Thanks,\nFixture', maxLength: max })
+  assert.equal(state.label, 'Saved')
+  assert.equal(state.disabled, true)
+  assert.equal(state.showEmptyHint, false)
+
+  // Saved then edited: save enabled again
+  state = content.signatureEditorState({ loaded: true, saving: false, signature: 'Thanks,\nFixture v2', savedSignature: 'Thanks,\nFixture', maxLength: max })
+  assert.equal(state.label, 'Save signature')
+  assert.equal(state.disabled, false)
+  assert.equal(state.showEmptyHint, false)
+
+  // Saving in progress: disabled regardless
+  state = content.signatureEditorState({ loaded: true, saving: true, signature: 'x', savedSignature: '', maxLength: max })
+  assert.equal(state.label, 'Saving...')
+  assert.equal(state.disabled, true)
+
+  // Not loaded: disabled
+  state = content.signatureEditorState({ loaded: false, saving: false, signature: 'x', savedSignature: '', maxLength: max })
+  assert.equal(state.disabled, true)
+
+  // Over max length: disabled
+  state = content.signatureEditorState({ loaded: true, saving: false, signature: 'x'.repeat(max + 1), savedSignature: '', maxLength: max })
+  assert.equal(state.disabled, true)
+
+  // Clearing a saved signature: enabled — empty editor over persisted content is a clear action
+  state = content.signatureEditorState({ loaded: true, saving: false, signature: '', savedSignature: 'Thanks,\nFixture', maxLength: max })
+  assert.equal(state.label, 'Save signature')
+  assert.equal(state.disabled, false)
+  assert.equal(state.showEmptyHint, false)
+
+  // Whitespace-only editor content with nothing saved: treated as empty, disabled
+  state = content.signatureEditorState({ loaded: true, saving: false, signature: '   ', savedSignature: '', maxLength: max })
+  assert.equal(state.disabled, true)
+  assert.equal(state.showEmptyHint, true)
+})
+

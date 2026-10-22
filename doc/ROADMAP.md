@@ -119,6 +119,10 @@ Still deferred, on purpose, from that repair: a durable revealed-contact store, 
 
 User edits survive the seed. Tests live in `tests/email-content.cjs`.
 
+### Signature editor empty state
+
+**Done on branch `fix/signature-empty-state`** (PR number to be filled at merge). The signature editor button no longer reads "Saved" when nothing is saved. A new pure helper `signatureEditorState` in `lib/email-signature.ts` distinguishes empty (button "Save signature", disabled until text is entered, "No signature saved yet" hint shown), unchanged ("Saved", disabled), edited ("Save signature", enabled), and clearing (empty editor over a saved signature stays enabled so a signature can still be removed). Unit coverage in `tests/email-signature.cjs`.
+
 ## Partial
 
 ### Scheduled sending
@@ -201,6 +205,10 @@ metadata migration, contact-history repair after crashes, a dedicated export
 worker and a rehearsed canonical-ledger cutover remain open.
 
 ## Open
+
+### Data-quality banner copy
+
+The "Limited ANZ data found. Verify before outreach." banner (`app/dossier/page.tsx`, fires on `data_quality === 'insufficient'`) is misleading for non-ANZ brands: the condition is generic low data quality, not ANZ-specific absence. Rename to "Limited data found. Verify before outreach." One-line copy change; no scoring logic affected. Follow-ons (separate items): native-currency revenue display alongside AUD banding; region-aware research prompt for non-ANZ brands.
 
 ### Ledger, then Copper
 

@@ -1,7 +1,7 @@
 'use client'
 
 import { userStorage } from '@/lib/browser-storage'
-import { SIGNATURE_MAX_LENGTH } from '@/lib/email-signature'
+import { SIGNATURE_MAX_LENGTH, signatureEditorState } from '@/lib/email-signature'
 
 import { useEffect, useState } from 'react'
 
@@ -109,6 +109,14 @@ export default function TemplatesPage() {
       setSignatureError('Signature could not be loaded. Refresh and try again.')
     }
   }
+
+  const editorState = signatureEditorState({
+    loaded: signatureLoaded,
+    saving: savingSignature,
+    signature,
+    savedSignature,
+    maxLength: SIGNATURE_MAX_LENGTH
+  })
 
   async function saveSignature() {
     if (!signatureLoaded || signature === savedSignature) return
@@ -281,10 +289,10 @@ export default function TemplatesPage() {
           </div>
           <button
             onClick={saveSignature}
-            disabled={!signatureLoaded || savingSignature || signature === savedSignature || signature.length > SIGNATURE_MAX_LENGTH}
+            disabled={editorState.disabled}
             className="btn btn-primary btn-sm"
           >
-            {savingSignature ? 'Saving...' : signature === savedSignature ? 'Saved' : 'Save signature'}
+            {editorState.label}
           </button>
         </div>
         <textarea
@@ -295,6 +303,11 @@ export default function TemplatesPage() {
           aria-label="Email signature"
           placeholder={'Thanks,\nYour name\n[site](https://example.invalid)'}
         />
+        {editorState.showEmptyHint && !signatureError && (
+          <div style={{ color: 'var(--orange-400)', fontSize: 12, marginTop: 8 }}>
+            No signature saved yet — outgoing emails will have no signature until one is saved here.
+          </div>
+        )}
         {signatureError && <div style={{ color: 'var(--red-400)', fontSize: 12, marginTop: 8 }}>{signatureError}</div>}
       </div>
 

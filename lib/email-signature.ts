@@ -12,6 +12,28 @@ export function signatureFromUnknown(value: unknown): string {
   return typeof value === 'string' ? value : ''
 }
 
+export interface SignatureEditorState {
+  label: 'Save signature' | 'Saved' | 'Saving...'
+  disabled: boolean
+  showEmptyHint: boolean
+}
+
+export function signatureEditorState(input: {
+  loaded: boolean
+  saving: boolean
+  signature: string
+  savedSignature: string
+  maxLength?: number
+}): SignatureEditorState {
+  const maxLength = input.maxLength ?? SIGNATURE_MAX_LENGTH
+  const unchanged = input.signature === input.savedSignature
+  const nothingSaved = input.savedSignature.trim() === ''
+  const clearing = input.signature.trim() === '' && !nothingSaved
+  const label = input.saving ? 'Saving...' : unchanged && !nothingSaved ? 'Saved' : 'Save signature'
+  const disabled = !input.loaded || input.saving || unchanged || (input.signature.trim() === '' && !clearing) || input.signature.length > maxLength
+  return { label, disabled, showEmptyHint: nothingSaved }
+}
+
 export function normaliseSignature(signature: unknown): string {
   if (typeof signature !== 'string') return ''
   return signature.replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/^\n+/, '').replace(/\s+$/g, '')
