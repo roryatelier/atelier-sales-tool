@@ -448,7 +448,6 @@ export default function EmailPage() {
       userStorage.removeItem('email_template')
     }
     const followUpContextRaw = userStorage.getItem('follow_up_context')
-    console.log('[follow-up] localStorage follow_up_context at load:', followUpContextRaw)
     if (followUpContextRaw) {
       const parsed = JSON.parse(followUpContextRaw)
       followUpContextRef.current = parsed
@@ -2043,7 +2042,7 @@ export default function EmailPage() {
                   value={scheduledAt}
                   onChange={e => setScheduledAt(e.target.value)}
                   className="input"
-                  min={new Date().toISOString().slice(0, 16)}
+                  min={new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 16)}
                 />
               </div>
               <div style={{ marginBottom: 20 }}>
