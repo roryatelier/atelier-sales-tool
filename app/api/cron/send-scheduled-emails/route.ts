@@ -1,4 +1,11 @@
+import { timingSafeEqual } from 'node:crypto'
 import { NextRequest, NextResponse } from 'next/server'
+
+function cronSecretMatches(presented: string | null, secret: string): boolean {
+  const a = Buffer.from(presented ?? '')
+  const b = Buffer.from(`Bearer ${secret}`)
+  return a.length === b.length && timingSafeEqual(a, b)
+}
 import { initialiseDb, isVercel, getLocalDb } from '@/lib/db'
 import { openGmailCredentials, isAuthorizedEmail } from '@/lib/auth-policy'
 import { makeEmailRaw, refreshScheduledGmailToken, sendViaGmail } from '@/lib/gmail'
@@ -20,7 +27,7 @@ async function recordHistory(email: ScheduledEmail) {
 
 export async function GET(request: NextRequest) {
   const secret = process.env.CRON_SECRET
-  if (!secret || request.headers.get('authorization') !== `Bearer ${secret}`) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  if (!secret || !cronSecretMatches(request.headers.get('authorization'), secret)) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   try { await initialiseDb() } catch { return NextResponse.json({ error: 'Database unavailable' }, { status: 503 }) }
 
   const recovery = await recoverScheduledEmails()
