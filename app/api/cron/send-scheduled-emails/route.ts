@@ -4,7 +4,7 @@ import { openGmailCredentials, isAuthorizedEmail } from '@/lib/auth-policy'
 import { makeEmailRaw, refreshScheduledGmailToken, sendViaGmail } from '@/lib/gmail'
 import { pipelineSnapshot, preparePipelineExport, syncPipelineSource, processPipelineExports } from '@/lib/outreach-outbox'
 
-import { claimNext, recoverScheduledEmails, beginScheduledSend, failScheduledSend, acceptScheduledSend, recordLostAcceptance, type ScheduledEmail } from '@/lib/scheduled-email-store'
+import { claimNext, recoverScheduledEmails, beginScheduledSend, failScheduledSend, acceptScheduledSend, recordAcceptedMessageId, type ScheduledEmail } from '@/lib/scheduled-email-store'
 
 async function recordHistory(email: ScheduledEmail) {
   try {
@@ -75,7 +75,7 @@ export async function GET(request: NextRequest) {
         // recorded. Persist the id and queue the export before anything else, so
         // review never turns into a hand resend and the outbox row is not lost.
         if (messageId) {
-          try { await recordLostAcceptance(email, messageId) } catch (recordError) { console.error('Scheduled send id preservation failed', recordError) }
+          try { await recordAcceptedMessageId(email, messageId) } catch (recordError) { console.error('Scheduled send id preservation failed', recordError) }
         }
         throw acceptanceError
       }

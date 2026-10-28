@@ -1335,3 +1335,17 @@ test('snapshot persistence outages cannot strand an immediate send before Gmail'
   outage=false;assert.equal((await send(request())).status,200);assert.equal(gmailSendCalls,before+1)
  }finally{restoreSendMocks();fs.rmSync(dbPath,{force:true})}
 })
+
+test('dossier signal bullets escape HTML before the bold transform', () => {
+  const { renderDossierBullet } = load('lib/dossier-bullet.ts')
+  const script = renderDossierBullet('<script>alert(1)</script>')
+  assert.equal(script.includes('<script>'), false)
+  assert.equal(script.includes('\u0026lt;script\u0026gt;'), true)
+  const injection = renderDossierBullet('<img src=x onerror=alert(1)>')
+  assert.equal(injection.includes('<img'), false)
+  assert.equal(/</.test(injection), false)
+  assert.equal(injection.includes('onerror=alert(1)'), true)
+  const bold = renderDossierBullet('Great **launch**.')
+  assert.equal(bold.includes('<strong'), true)
+  assert.equal(bold.includes('launch</strong>'), true)
+})

@@ -86,7 +86,7 @@ export async function acceptScheduledSend(email: ScheduledEmail, messageId: stri
   }
 }
 
-export async function recordLostAcceptance(email: ScheduledEmail, messageId: string) {
+export async function recordAcceptedMessageId(email: ScheduledEmail, messageId: string) {
   // Best-effort durable proof that Gmail accepted this attempt. The message id is
   // stored and the export row queued even when the full acceptance write cannot
   // complete, so review never turns into a hand resend. Retrying this write never
