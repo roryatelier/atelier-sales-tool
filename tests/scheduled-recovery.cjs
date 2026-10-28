@@ -9,7 +9,7 @@ const { NextRequest } = require('next/server')
 const root = path.resolve(__dirname, '..')
 function fixture() {
   const db = new Database(':memory:')
-  db.exec(`CREATE TABLE scheduled_emails (id INTEGER PRIMARY KEY, to_email TEXT, cc TEXT, bcc TEXT, subject TEXT, body TEXT, brand_name TEXT, contact_name TEXT, owner_google_sub TEXT, owner_email TEXT, credential_ciphertext TEXT, dossier_json TEXT, scheduled_at TEXT, delivery_status TEXT, claimed_at TEXT, attempt_count INTEGER DEFAULT 0, sent INTEGER DEFAULT 0, sent_at TEXT, gmail_message_id TEXT, last_error_code TEXT, claim_token TEXT, send_intent_at TEXT, next_attempt_at TEXT, timezone TEXT, sent_by TEXT); CREATE TABLE contact_history (brand_name TEXT, contact_role TEXT, contact_name TEXT, contact_email TEXT, method TEXT)`)
+  db.exec(`CREATE TABLE scheduled_emails (id INTEGER PRIMARY KEY, to_email TEXT, cc TEXT, bcc TEXT, subject TEXT, body TEXT, brand_name TEXT, contact_name TEXT, owner_google_sub TEXT, owner_email TEXT, credential_ciphertext TEXT, dossier_json TEXT, scheduled_at TEXT, delivery_status TEXT, claimed_at TEXT, attempt_count INTEGER DEFAULT 0, sent INTEGER DEFAULT 0, sent_at TEXT, gmail_message_id TEXT, gmail_thread_id TEXT, last_error_code TEXT, claim_token TEXT, send_intent_at TEXT, next_attempt_at TEXT, timezone TEXT, sent_by TEXT); CREATE TABLE contact_history (brand_name TEXT, contact_role TEXT, contact_name TEXT, contact_email TEXT, method TEXT)`)
   let calls = 0
   const behavior = { refresh: { accessToken: 'synthetic' }, sendError: null, onSend: null }
   const cache = new Map()
@@ -23,7 +23,7 @@ function fixture() {
       if (name === '@/lib/session') return { getGmailCredentials: async () => ({ refreshToken: 'synthetic' }) }
       if (name === '@/lib/db') return { initialiseDb: async () => {}, isVercel: false, getLocalDb: () => new Proxy(db, { get: (target, prop) => prop === 'close' ? () => {} : typeof target[prop] === 'function' ? target[prop].bind(target) : target[prop] }) }
       if (name === '@/lib/auth-policy') return { sealGmailCredentials: async () => 'fresh-synthetic', openGmailCredentials: async () => ({ refreshToken: 'synthetic' }), isAuthorizedEmail: () => true }
-      if (name === '@/lib/gmail') return { makeEmailRaw: () => 'synthetic', refreshGmailToken: async () => 'synthetic', refreshScheduledGmailToken: async () => behavior.refresh, sendViaGmail: async () => { calls++; if (behavior.onSend) await behavior.onSend(); if (behavior.sendError) throw behavior.sendError; return 'synthetic-message' } }
+      if (name === '@/lib/gmail') return { makeEmailRaw: () => 'synthetic', refreshGmailToken: async () => { if (behavior.refreshFails) return null; return 'synthetic' }, refreshScheduledGmailToken: async () => behavior.refresh, sendViaGmail: async () => { calls++; if (behavior.onSend) await behavior.onSend(); if (behavior.sendError) throw behavior.sendError; return { id: 'synthetic-message', threadId: 'synthetic-thread' } } }
       if (name === '@/lib/outreach-outbox') return { pipelineSnapshot: JSON.stringify, preparePipelineExport: async () => { if (behavior.prepareError) throw new Error('synthetic preparation failure') }, syncPipelineSource: async () => 'synced', processPipelineExports: async () => { if (behavior.exportDelay) behavior.now = Date.now() + behavior.exportDelay } }
       if (name === '@/lib/sheets') return { appendPipelineRow: async () => {} }
       if (name.startsWith('@/')) return load(name.slice(2) + '.ts')
@@ -183,7 +183,7 @@ const SCHEDULE_SCHEMA = `CREATE TABLE IF NOT EXISTS scheduled_emails (
   owner_google_sub TEXT, owner_email TEXT, credential_ciphertext TEXT, dossier_json TEXT DEFAULT '',
   pipeline_payload TEXT, timezone TEXT DEFAULT 'Australia/Sydney',
   delivery_status TEXT DEFAULT 'legacy_quarantined', attempt_count INTEGER DEFAULT 0,
-  claimed_at TEXT, sent_at TEXT, gmail_message_id TEXT, last_error_code TEXT,
+  claimed_at TEXT, sent_at TEXT, gmail_message_id TEXT, gmail_thread_id TEXT, last_error_code TEXT,
   claim_token TEXT, send_intent_at TEXT, next_attempt_at TEXT,
   request_id TEXT, payload_hash TEXT,
   UNIQUE (request_id),
@@ -226,6 +226,24 @@ test('a schedule request id bound to different content is rejected', async () =>
   } finally { f.db.close() }
 })
 
+test('a replay succeeds even when the Gmail token refresh would fail', async () => {
+  const f = scheduleFixture(); try {
+    const route = f.load('app/api/schedule-email/route.ts').POST
+    const first = await route(scheduleRequest(SCHEDULE_REQUEST_BODY))
+    assert.equal(first.status, 200)
+    // The recorded job exists, so a retry must replay without touching Gmail.
+    f.behavior.refreshFails = true
+    const replay = await route(scheduleRequest(SCHEDULE_REQUEST_BODY))
+    assert.equal(replay.status, 200)
+    assert.equal(JSON.parse(await replay.text()).replayed, true)
+    assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM scheduled_emails').get().n, 1)
+    // A brand-new request still needs Gmail and now reports the reauth error.
+    const fresh = await route(scheduleRequest({ ...SCHEDULE_REQUEST_BODY, request_id: 'aaaaaaa1-0000-4000-8000-0000000000ff' }))
+    assert.equal(fresh.status, 401)
+    assert.equal(JSON.parse(await fresh.text()).reauth, true)
+  } finally { f.db.close() }
+})
+
 test('schedule requests without a request id fail closed', async () => {
   const f = scheduleFixture(); try {
     const route = f.load('app/api/schedule-email/route.ts').POST
@@ -248,13 +266,15 @@ test('scheduling with attachments is blocked with a clear message and nothing is
 test('acceptance failure after Gmail intent preserves the Gmail message id and queues the export', async () => {
   const f = scheduleFixture(); try {
     f.db.exec(`CREATE TABLE IF NOT EXISTS outreach_exports (source_key TEXT PRIMARY KEY, owner_google_sub TEXT, payload TEXT, gmail_message_id TEXT, accepted_at TEXT)`)
+    f.db.exec('ALTER TABLE scheduled_emails ADD COLUMN pipeline_payload TEXT')
     f.seed('pending')
     const store = f.load('lib/scheduled-email-store.ts')
     const originalAccept = store.acceptScheduledSend
     // Simulate the acceptance write being lost after Gmail returned an id: the
     // id is recorded by the preservation path, then the acceptance still fails.
+    f.db.exec(`UPDATE scheduled_emails SET pipeline_payload = '{"synthetic":true}'`)
     store.acceptScheduledSend = async (job, id) => {
-      await store.recordLostAcceptance(job, id)
+      await store.recordAcceptedMessageId(job, id, 'synthetic-thread')
       throw new Error('acceptance_not_recorded')
     }
     await f.run()
@@ -264,10 +284,18 @@ test('acceptance failure after Gmail intent preserves the Gmail message id and q
     const exportRow = f.db.prepare('SELECT * FROM outreach_exports WHERE source_key = ?').get('scheduled:' + row.id)
     assert.ok(exportRow, 'the export event must be queued despite the lost acceptance write')
     assert.equal(exportRow.gmail_message_id, 'synthetic-message')
+    assert.equal(exportRow.payload, '{"synthetic":true}', 'the queued export must carry the real pipeline payload read from the row')
+    assert.equal(row.gmail_thread_id, 'synthetic-thread')
+    // The recorded error code is the specific one, not the generic ambiguity code.
+    assert.equal(row.last_error_code, 'acceptance_write_lost')
     // A late replay of the same request never resends: the acceptance is complete.
     store.acceptScheduledSend = originalAccept
     await store.acceptScheduledSend(row, row.gmail_message_id)
     assert.equal(f.db.prepare('SELECT delivery_status FROM scheduled_emails WHERE id=?').get(row.id).delivery_status, 'sent')
+    // A second worker pass must not call Gmail again for this job.
+    const callsBefore = f.calls()
+    await f.run()
+    assert.equal(f.calls(), callsBefore, 'a repeated worker run must never trigger another Gmail send')
     assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM outreach_exports').get().n, 1)
   } finally { f.db.close() }
 })

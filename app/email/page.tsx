@@ -914,6 +914,29 @@ export default function EmailPage() {
     setScheduledAt(`${value('year')}-${value('month')}-${value('day')}T${value('hour')}:${value('minute')}`)
   }
 
+  function scheduleFingerprint(): string {
+    const payload = JSON.stringify({
+      to: toEmail, cc: ccEmail, bcc: bccEmail, subject: email?.subject ?? '',
+      body: outboundBody(), scheduledAt, timezone: scheduleTimezone, brand: dossier?.brand_name ?? '',
+    })
+    let hash = 5381
+    for (let i = 0; i < payload.length; i++) hash = ((hash << 5) + hash + payload.charCodeAt(i)) | 0
+    return (hash >>> 0).toString(36)
+  }
+
+  function readStoredScheduleRequest(fingerprint: string): string {
+    try { return sessionStorage.getItem(`atelier_schedule_request_${fingerprint}`) ?? '' } catch { return '' }
+  }
+
+  function storeScheduleRequest(fingerprint: string, requestId: string) {
+    try { sessionStorage.setItem(`atelier_schedule_request_${fingerprint}`, requestId) } catch {}
+  }
+
+  function clearScheduleRequest() {
+    setScheduleRequestId('')
+    try { sessionStorage.removeItem(`atelier_schedule_request_${scheduleFingerprint()}`) } catch {}
+  }
+
   async function handleSchedule() {
     if (!email || !scheduledAt) return
     if (attachments.length > 0) {
@@ -924,12 +947,16 @@ export default function EmailPage() {
     setScheduling(true)
     try {
       // One confirmed schedule submission gets one stable identity: the server
-      // replays the recorded job instead of creating a duplicate on retry.
+      // replays the recorded job instead of creating a duplicate on retry. The id
+      // survives reloads and second tabs through sessionStorage, keyed by a
+      // fingerprint of the exact draft being scheduled.
       let requestId = scheduleRequestId
+      if (!requestId) requestId = readStoredScheduleRequest(scheduleFingerprint())
       if (!requestId) {
         requestId = crypto.randomUUID()
-        setScheduleRequestId(requestId)
+        storeScheduleRequest(scheduleFingerprint(), requestId)
       }
+      setScheduleRequestId(requestId)
       const res = await fetch('/api/schedule-email', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -950,15 +977,18 @@ export default function EmailPage() {
         }),
       })
       const data = await res.json()
-      if (data.reauth) { setScheduleRequestId(''); setNeedsAuth(true); setShowScheduleModal(false); return }
+      // Keep the request id on reauth and server errors: the retry replays the
+      // recorded job instead of creating a duplicate. Clear it only when the
+      // server settled the request (success, or a 4xx validation rejection).
+      if (data.reauth) { setNeedsAuth(true); setShowScheduleModal(false); return }
       if (!res.ok || !data.success) {
-        setScheduleRequestId('')
+        if (res.status >= 400 && res.status < 500) clearScheduleRequest()
         setError(data.error ?? 'Failed to schedule email. Please try again.')
         setShowScheduleModal(false)
         return
       }
       // A replayed confirmation is the same job: show success without re-submitting.
-      setScheduleRequestId('')
+      clearScheduleRequest()
       setScheduledTabIds(prev => new Set([...prev, activeTabId]))
       setShowScheduleModal(false)
     } catch {

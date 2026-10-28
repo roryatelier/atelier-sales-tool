@@ -1349,3 +1349,20 @@ test('dossier signal bullets escape HTML before the bold transform', () => {
   assert.equal(bold.includes('<strong'), true)
   assert.equal(bold.includes('launch</strong>'), true)
 })
+
+test('schedule idempotency conflict target matches the partial unique index on both dialects', () => {
+  const route = fs.readFileSync(path.join(root, 'app/api/schedule-email/route.ts'), 'utf8')
+  const db = fs.readFileSync(path.join(root, 'lib/db.ts'), 'utf8')
+  // Postgres cannot infer a partial index from a bare conflict target, so the
+  // insert must repeat the index predicate.
+  assert.match(route, /ON CONFLICT \(request_id\) WHERE request_id IS NOT NULL DO NOTHING/)
+  assert.match(db, /CREATE UNIQUE INDEX IF NOT EXISTS scheduled_emails_request_id ON scheduled_emails \(request_id\) WHERE request_id IS NOT NULL/)
+  // Postgres migrations must be idempotent for an existing production database.
+  assert.match(db, /ALTER TABLE scheduled_emails ADD COLUMN IF NOT EXISTS request_id TEXT/)
+  assert.match(db, /ALTER TABLE scheduled_emails ADD COLUMN IF NOT EXISTS payload_hash TEXT/)
+  assert.match(db, /ALTER TABLE scheduled_emails ADD COLUMN IF NOT EXISTS gmail_thread_id TEXT/)
+  // Replay happens before any Gmail credential work.
+  const dedupeIndex = route.indexOf('const existing = await loadExisting()')
+  const refreshIndex = route.indexOf('await refreshGmailToken(credentials.refreshToken)')
+  assert.ok(dedupeIndex !== -1 && refreshIndex !== -1 && dedupeIndex < refreshIndex, 'replay lookup must precede the token refresh')
+})

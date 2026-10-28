@@ -5,7 +5,7 @@ export interface ScheduledEmail {
   id: number; to_email: string; cc: string; bcc: string; subject: string; body: string
   brand_name: string; contact_name: string; owner_google_sub: string; owner_email: string
   credential_ciphertext: string; dossier_json: string; claim_token: string
-  pipeline_payload?: string | null; gmail_message_id?: string | null
+  pipeline_payload?: string | null; gmail_message_id?: string | null; gmail_thread_id?: string | null
 }
 
 // Five minutes exceeds the worker's 90-second execution limit. A token fences
@@ -63,41 +63,46 @@ export async function beginScheduledSend(email: ScheduledEmail) {
   [new Date().toISOString(), email.id, email.claim_token, cutoff()])).length === 1
 }
 
-export async function failScheduledSend(email: ScheduledEmail, status: 'needs_reauth' | 'needs_review' | 'pending', code: string) {
-  // Only pre-intent failures may be retried or resumed.
-  return query(`UPDATE scheduled_emails SET delivery_status = ?, last_error_code = ?, next_attempt_at = ?
+export async function failScheduledSend(email: ScheduledEmail, status: 'needs_reauth' | 'needs_review' | 'pending', code: string, preserveErrorCode = false) {
+  // Only pre-intent failures may be retried or resumed. When a more specific code
+  // (such as acceptance_write_lost) was already recorded for this attempt, the
+  // generic outcome code must not overwrite it.
+  return query(`UPDATE scheduled_emails SET delivery_status = ?, last_error_code = ${preserveErrorCode ? 'last_error_code' : '?'}, next_attempt_at = ?
     WHERE id = ? AND claim_token = ? AND ${status === 'needs_review' ? "delivery_status = 'sending'" : "delivery_status = 'claimed' AND send_intent_at IS NULL"} RETURNING id`,
-  [status, code, status === 'pending' ? new Date(Date.now() + 5 * 60_000).toISOString() : null, email.id, email.claim_token])
+  preserveErrorCode ? [status, status === 'pending' ? new Date(Date.now() + 5 * 60_000).toISOString() : null, email.id, email.claim_token]
+    : [status, code, status === 'pending' ? new Date(Date.now() + 5 * 60_000).toISOString() : null, email.id, email.claim_token])
 }
 
-export async function acceptScheduledSend(email: ScheduledEmail, messageId: string) {
+export async function acceptScheduledSend(email: ScheduledEmail, messageId: string, threadId?: string | null) {
   if (!messageId.trim()) throw new Error('missing_message_id')
   // A late response can resolve recovery's uncertainty for this same attempt.
   // Retrying this write never retries Gmail, including commit-with-lost-ack.
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      const rows = await query(`UPDATE scheduled_emails SET delivery_status = 'sent', sent = ${isVercel ? 'true' : '1'}, sent_at = ?, gmail_message_id = ?, last_error_code = NULL
+      const rows = await query(`UPDATE scheduled_emails SET delivery_status = 'sent', sent = ${isVercel ? 'true' : '1'}, sent_at = ?, gmail_message_id = ?, gmail_thread_id = COALESCE(?, gmail_thread_id), last_error_code = NULL
         WHERE id = ? AND claim_token = ? AND send_intent_at IS NOT NULL
         AND (delivery_status IN ('sending', 'needs_review') OR (delivery_status = 'sent' AND gmail_message_id = ?)) RETURNING id`,
-      [new Date().toISOString(), messageId, email.id, email.claim_token, messageId])
+      [new Date().toISOString(), messageId, threadId ?? null, email.id, email.claim_token, messageId])
       if (rows.length !== 1) throw new Error('acceptance_not_recorded')
       return
     } catch (error) { if (attempt === 2) throw error }
   }
 }
 
-export async function recordAcceptedMessageId(email: ScheduledEmail, messageId: string) {
+export async function recordAcceptedMessageId(email: ScheduledEmail, messageId: string, threadId?: string | null) {
   // Best-effort durable proof that Gmail accepted this attempt. The message id is
   // stored and the export row queued even when the full acceptance write cannot
   // complete, so review never turns into a hand resend. Retrying this write never
-  // retries Gmail.
+  // retries Gmail. The payload is read from the row itself, not the stale
+  // in-memory snapshot, so the queued export carries the real pipeline payload.
   if (!messageId.trim()) throw new Error('missing_message_id')
-  await query(`UPDATE scheduled_emails SET gmail_message_id = ?, last_error_code = 'acceptance_write_lost', next_attempt_at = NULL
-    WHERE id = ? AND claim_token = ? AND send_intent_at IS NOT NULL RETURNING id`, [messageId, email.id, email.claim_token])
+  await query(`UPDATE scheduled_emails SET gmail_message_id = ?, gmail_thread_id = COALESCE(?, gmail_thread_id), last_error_code = 'acceptance_write_lost', next_attempt_at = NULL
+    WHERE id = ? AND claim_token = ? AND send_intent_at IS NOT NULL RETURNING id`, [messageId, threadId ?? null, email.id, email.claim_token])
   await query(`INSERT INTO outreach_exports(source_key, owner_google_sub, payload, gmail_message_id, accepted_at)
-    SELECT 'scheduled:' || ?, ?, COALESCE(?, '{}'), ?, ${isVercel ? 'NOW()' : "datetime('now')"}
+    SELECT 'scheduled:' || id, owner_google_sub, pipeline_payload, ?, ${isVercel ? 'NOW()' : "datetime('now')"}
+    FROM scheduled_emails WHERE id = ?
     ON CONFLICT (source_key) DO NOTHING RETURNING source_key`,
-    [String(email.id), email.owner_google_sub, email.pipeline_payload ?? null, messageId])
+    [messageId, email.id])
 }
 
 export async function cancelScheduledEmail(id: number, owner: string) {

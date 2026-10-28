@@ -143,6 +143,7 @@ export async function initialiseDb() {
     await sql`ALTER TABLE scheduled_emails ADD COLUMN IF NOT EXISTS pipeline_payload TEXT`
     await sql`ALTER TABLE scheduled_emails ADD COLUMN IF NOT EXISTS request_id TEXT`
     await sql`ALTER TABLE scheduled_emails ADD COLUMN IF NOT EXISTS payload_hash TEXT`
+    await sql`ALTER TABLE scheduled_emails ADD COLUMN IF NOT EXISTS gmail_thread_id TEXT`
     // Idempotent scheduling: a request id binds one schedule submission to one job.
     // Existing NULL request ids (legacy rows) never collide on a partial index.
     await sql`CREATE UNIQUE INDEX IF NOT EXISTS scheduled_emails_request_id ON scheduled_emails (request_id) WHERE request_id IS NOT NULL`
@@ -295,6 +296,7 @@ export async function initialiseDb() {
       try { db.exec(`ALTER TABLE scheduled_emails ADD COLUMN next_attempt_at TEXT`) } catch {}
       try { db.exec(`ALTER TABLE scheduled_emails ADD COLUMN request_id TEXT`) } catch {}
       try { db.exec(`ALTER TABLE scheduled_emails ADD COLUMN payload_hash TEXT`) } catch {}
+      try { db.exec(`ALTER TABLE scheduled_emails ADD COLUMN gmail_thread_id TEXT`) } catch {}
       // Idempotent scheduling: partial unique index keeps legacy NULL request ids out.
       db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS scheduled_emails_request_id ON scheduled_emails (request_id) WHERE request_id IS NOT NULL`)
       ensureSqliteSendRecords(db)

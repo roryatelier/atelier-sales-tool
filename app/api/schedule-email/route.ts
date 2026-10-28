@@ -97,6 +97,14 @@ export async function POST(request: NextRequest) {
       brand_name: brand_name ?? '', contact_name: contact_name ?? '', dossier: dossier ?? null,
     }))
 
+    const { isVercel, getLocalDb } = await import('@/lib/db')
+    await initialiseDb()
+
+    // Replay or conflict before any Gmail work: a retry must replay the recorded
+    // job even when token refresh would fail.
+    const existing = await loadExisting()
+    if (existing) return replayResponse(existing)
+
     // New schedule: seal Gmail credentials only now, after dedupe — a replay must
     // not spend a token refresh. ON CONFLICT fences concurrent duplicates.
     const credentials = await getGmailCredentials(auth.session)
@@ -104,9 +112,6 @@ export async function POST(request: NextRequest) {
     const refreshedAccessToken = await refreshGmailToken(credentials.refreshToken)
     if (!refreshedAccessToken) return NextResponse.json({ error: 'Gmail authorisation could not be verified. Re-authorise Gmail.', reauth: true }, { status: 401 })
     const credentialCiphertext = await sealGmailCredentials({ ...auth.session, accessToken: refreshedAccessToken, refreshToken: credentials.refreshToken })
-
-    const { isVercel, getLocalDb } = await import('@/lib/db')
-    await initialiseDb()
 
     async function loadExisting(): Promise<{ status: string | null; payload_hash: string | null; scheduled_at: string | null; owner_google_sub: string | null } | undefined> {
       if (isVercel) {
@@ -130,17 +135,13 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ success: true, replayed: true, scheduled_at: existing.scheduled_at ?? scheduledAt.toISOString() })
     }
 
-    // Replay or conflict before any durable write or Gmail work.
-    const existing = await loadExisting()
-    if (existing) return replayResponse(existing)
-
     if (isVercel) {
       const { sql } = await import('@vercel/postgres')
       const result = await sql`
         INSERT INTO scheduled_emails
           (to_email, cc, bcc, subject, body, brand_name, contact_name, scheduled_at, timezone, sent_by, dossier_json, owner_google_sub, owner_email, credential_ciphertext, delivery_status, request_id, payload_hash)
         VALUES (${to.trim()}, ${cc ?? ''}, ${bcc ?? ''}, ${subject}, ${emailBody}, ${brand_name ?? ''}, ${contact_name ?? ''}, ${scheduledAt.toISOString()}, ${timezone}, ${session.email}, ${dossier ? JSON.stringify(dossier) : ''}, ${session.googleSub}, ${session.email}, ${credentialCiphertext}, 'pending', ${requestId}, ${payloadHash})
-        ON CONFLICT (request_id) DO NOTHING
+        ON CONFLICT (request_id) WHERE request_id IS NOT NULL DO NOTHING
         RETURNING id`
       if ((result.rowCount ?? 0) === 0) return replayResponse(await loadExisting())
     } else {

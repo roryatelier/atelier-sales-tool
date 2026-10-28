@@ -14,7 +14,7 @@ The Atelier Sales Intelligence Tool is a full-stack web application built with N
 
 **Live URL:** https://atelier-sales-preview.vercel.app
 **GitHub:** https://github.com/roryatelier/atelier-sales-tool
-**Google Sheets Pipeline:** https://docs.google.com/spreadsheets/d/1t2dGrIg9sQYGuqhU38qYcHBRM9XYmk3LFa_k_mA4cd8
+**Google Sheets Pipeline:** spreadsheet ID is configured via the `GOOGLE_SHEETS_ID` environment variable (value intentionally not recorded here).
 
 ---
 
@@ -55,7 +55,7 @@ OPENAI_API_KEY=
 APP_ALLOWED_EMAILS=
 GMAIL_CLIENT_ID=
 GMAIL_CLIENT_SECRET=
-GOOGLE_SHEETS_ID=1t2dGrIg9sQYGuqhU38qYcHBRM9XYmk3LFa_k_mA4cd8
+GOOGLE_SHEETS_ID=<spreadsheet id — configured in the deployment environment, never committed>
 GOOGLE_SERVICE_ACCOUNT=
 LUSHA_API_KEY=
 JWT_SECRET=
