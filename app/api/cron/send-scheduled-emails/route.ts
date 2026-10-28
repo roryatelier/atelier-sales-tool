@@ -4,7 +4,7 @@ import { openGmailCredentials, isAuthorizedEmail } from '@/lib/auth-policy'
 import { makeEmailRaw, refreshScheduledGmailToken, sendViaGmail } from '@/lib/gmail'
 import { pipelineSnapshot, preparePipelineExport, syncPipelineSource, processPipelineExports } from '@/lib/outreach-outbox'
 
-import { claimNext, recoverScheduledEmails, beginScheduledSend, failScheduledSend, acceptScheduledSend, type ScheduledEmail } from '@/lib/scheduled-email-store'
+import { claimNext, recoverScheduledEmails, beginScheduledSend, failScheduledSend, acceptScheduledSend, recordLostAcceptance, type ScheduledEmail } from '@/lib/scheduled-email-store'
 
 async function recordHistory(email: ScheduledEmail) {
   try {
@@ -65,14 +65,26 @@ export async function GET(request: NextRequest) {
       }
       if (!await beginScheduledSend(email)) continue
       sendStarted = true
-      const messageId = await sendViaGmail(refresh.accessToken, raw)
-      if (!messageId) throw new Error('missing_message_id')
-      await acceptScheduledSend(email, messageId)
+      let messageId: string | null = null
+      try {
+        messageId = await sendViaGmail(refresh.accessToken, raw)
+        if (!messageId) throw new Error('missing_message_id')
+        await acceptScheduledSend(email, messageId)
+      } catch (acceptanceError) {
+        // Gmail may have accepted this attempt even though acceptance could not be
+        // recorded. Persist the id and queue the export before anything else, so
+        // review never turns into a hand resend and the outbox row is not lost.
+        if (messageId) {
+          try { await recordLostAcceptance(email, messageId) } catch (recordError) { console.error('Scheduled send id preservation failed', recordError) }
+        }
+        throw acceptanceError
+      }
       sent++
       await recordHistory(email)
       try { await syncPipelineSource(`scheduled:${email.id}`, email.owner_google_sub) } catch { console.error('Scheduled pipeline export pending') }
-    } catch {
+    } catch (workerError) {
       if (!sendStarted) {
+        console.error('Scheduled send preparation failed', workerError)
         await failScheduledSend(email, 'pending', 'preparation_failed')
         continue
       }

@@ -5,6 +5,7 @@ export interface ScheduledEmail {
   id: number; to_email: string; cc: string; bcc: string; subject: string; body: string
   brand_name: string; contact_name: string; owner_google_sub: string; owner_email: string
   credential_ciphertext: string; dossier_json: string; claim_token: string
+  pipeline_payload?: string | null; gmail_message_id?: string | null
 }
 
 // Five minutes exceeds the worker's 90-second execution limit. A token fences
@@ -83,6 +84,20 @@ export async function acceptScheduledSend(email: ScheduledEmail, messageId: stri
       return
     } catch (error) { if (attempt === 2) throw error }
   }
+}
+
+export async function recordLostAcceptance(email: ScheduledEmail, messageId: string) {
+  // Best-effort durable proof that Gmail accepted this attempt. The message id is
+  // stored and the export row queued even when the full acceptance write cannot
+  // complete, so review never turns into a hand resend. Retrying this write never
+  // retries Gmail.
+  if (!messageId.trim()) throw new Error('missing_message_id')
+  await query(`UPDATE scheduled_emails SET gmail_message_id = ?, last_error_code = 'acceptance_write_lost', next_attempt_at = NULL
+    WHERE id = ? AND claim_token = ? AND send_intent_at IS NOT NULL RETURNING id`, [messageId, email.id, email.claim_token])
+  await query(`INSERT INTO outreach_exports(source_key, owner_google_sub, payload, gmail_message_id, accepted_at)
+    SELECT 'scheduled:' || ?, ?, COALESCE(?, '{}'), ?, ${isVercel ? 'NOW()' : "datetime('now')"}
+    ON CONFLICT (source_key) DO NOTHING RETURNING source_key`,
+    [String(email.id), email.owner_google_sub, email.pipeline_payload ?? null, messageId])
 }
 
 export async function cancelScheduledEmail(id: number, owner: string) {

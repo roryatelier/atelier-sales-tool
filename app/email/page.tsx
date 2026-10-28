@@ -157,6 +157,7 @@ export default function EmailPage() {
   const [scheduledAt, setScheduledAt] = useState('')
   const [scheduleTimezone, setScheduleTimezone] = useState('Australia/Sydney')
   const [scheduling, setScheduling] = useState(false)
+  const [scheduleRequestId, setScheduleRequestId] = useState('')
   const [scheduledTabIds, setScheduledTabIds] = useState<Set<string>>(new Set())
   const dropdownRef = useRef<HTMLDivElement>(null)
   const pitchRef = useRef<HTMLDivElement>(null)
@@ -916,8 +917,20 @@ export default function EmailPage() {
 
   async function handleSchedule() {
     if (!email || !scheduledAt) return
+    if (attachments.length > 0) {
+      setError('Attachments cannot be scheduled yet. Send this email immediately or remove the attachment.')
+      setShowScheduleModal(false)
+      return
+    }
     setScheduling(true)
     try {
+      // One confirmed schedule submission gets one stable identity: the server
+      // replays the recorded job instead of creating a duplicate on retry.
+      let requestId = scheduleRequestId
+      if (!requestId) {
+        requestId = crypto.randomUUID()
+        setScheduleRequestId(requestId)
+      }
       const res = await fetch('/api/schedule-email', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -934,19 +947,25 @@ export default function EmailPage() {
           sent_by: userStorage.getItem('atelier_user_name') ?? '',
           dossier: dossier ?? undefined,
           expectedGoogleSub: userGoogleSub,
+          request_id: requestId,
         }),
       })
       const data = await res.json()
-      if (data.reauth) { setNeedsAuth(true); setShowScheduleModal(false); return }
+      if (data.reauth) { setScheduleRequestId(''); setNeedsAuth(true); setShowScheduleModal(false); return }
       if (!res.ok || !data.success) {
+        setScheduleRequestId('')
         setError(data.error ?? 'Failed to schedule email. Please try again.')
         setShowScheduleModal(false)
         return
       }
+      // A replayed confirmation is the same job: show success without re-submitting.
+      setScheduleRequestId('')
       setScheduledTabIds(prev => new Set([...prev, activeTabId]))
       setShowScheduleModal(false)
     } catch {
-      setError('Something went wrong. Please try again.')
+      // The response was lost: keep the request id so a retry replays the
+      // recorded job instead of creating a second one.
+      setError('The schedule request did not complete. Try again — this will not create a duplicate.')
       setShowScheduleModal(false)
     } finally {
       setScheduling(false)
@@ -1935,7 +1954,7 @@ export default function EmailPage() {
           <button onClick={() => setShowModal(true)} disabled={!signatureLoaded || !!signatureError} className="btn btn-primary" style={{ flex: 1, height: 52, fontSize: 15, boxShadow: '0 4px 24px rgba(0,0,0,0.12)' }}>
             Send email
           </button>
-          <button onClick={openScheduleModal} disabled={!signatureLoaded || !!signatureError} className="btn btn-secondary" style={{ flex: 1, height: 52, fontSize: 15, boxShadow: '0 4px 24px rgba(0,0,0,0.12)' }}>
+          <button onClick={openScheduleModal} disabled={!signatureLoaded || !!signatureError || scheduling} className="btn btn-secondary" style={{ flex: 1, height: 52, fontSize: 15, boxShadow: '0 4px 24px rgba(0,0,0,0.12)' }}>
             🕐 Schedule send
           </button>
           <button onClick={() => generateEmail(selectedRole)} disabled={loading} className="btn btn-secondary" style={{ flex: 1, height: 52, fontSize: 15, boxShadow: '0 4px 24px rgba(0,0,0,0.12)' }}>
