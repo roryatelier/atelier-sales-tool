@@ -1,6 +1,7 @@
 'use client'
 
 import ScheduledSends from './components/ScheduledSends'
+import InterruptedSends from './components/InterruptedSends'
 
 import { userStorage } from '@/lib/browser-storage'
 
@@ -834,6 +835,7 @@ export default function Dashboard() {
             </div>
 
             <ScheduledSends />
+            <InterruptedSends />
 
           </div>{/* end right */}
         </div>{/* end split pane row */}
