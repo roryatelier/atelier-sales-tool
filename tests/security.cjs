@@ -1455,16 +1455,30 @@ test('the sweeper moves abandoned sends to review without a second Gmail call', 
   const kept = db.prepare('SELECT * FROM send_records WHERE id = ?').get(record.id);
   assert.equal(kept.gmail_message_id, 'kept-id');
   assert.equal(kept.status, 'needs_review');
+  assert.equal(kept.last_error, 'Gmail accepted a message, but the outcome was not recorded. Review before sending again.');
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM outreach_exports').get().n, 1, 'the acceptance trigger enqueues exactly one export');
   assert.equal(await sweeper.sweepAbandonedSends(), 0, 'a second sweep of the same row enqueues nothing more');
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM outreach_exports').get().n, 1);
+  // ISO timestamps must use the same lease. A raw string compare treats 'T' as
+  // later than every sqlite datetime() on that day, so an abandoned ISO row
+  // would stay in 'sending' forever.
+  const isoAbandoned = new Date(Date.now() - 10 * 60_000).toISOString();
+  const isoInFlight = new Date(Date.now() - 60_000).toISOString();
+  db.prepare(`INSERT INTO send_records (request_id, owner_google_sub, owner_email, payload_hash, status, updated_at) VALUES ('cccccccc-0000-4000-8000-000000000004', ?, ?, 'x', 'sending', ?)`).run(user.googleSub, user.email, isoAbandoned);
+  db.prepare(`INSERT INTO send_records (request_id, owner_google_sub, owner_email, payload_hash, status, updated_at) VALUES ('cccccccc-0000-4000-8000-000000000005', ?, ?, 'x', 'sending', ?)`).run(user.googleSub, user.email, isoInFlight);
+  assert.equal(await sweeper.sweepAbandonedSends(), 1);
+  assert.equal(db.prepare('SELECT status FROM send_records WHERE request_id = ?').get('cccccccc-0000-4000-8000-000000000004').status, 'needs_review');
+  assert.equal(db.prepare('SELECT status FROM send_records WHERE request_id = ?').get('cccccccc-0000-4000-8000-000000000005').status, 'sending', 'an in-flight ISO timestamp inside the lease must not be swept');
   // Owner scoping: a row owned by another account is never returned to this owner.
   db.prepare(`INSERT INTO send_records (request_id, owner_google_sub, owner_email, payload_hash, status, updated_at) VALUES ('cccccccc-0000-4000-8000-000000000003', 'other-owner-sub', 'other-owner@example.invalid', 'x', 'needs_review', datetime('now'))`).run();
   const ownResponse = await send.GET(new NextRequest('https://example.invalid/api/send-email'));
-  const ownSends = (await ownResponse.json()).sends;
+  const ownBody = await ownResponse.json();
+  const ownSends = ownBody.sends;
+  assert.equal(ownBody.owner_google_sub, user.googleSub);
   assert.equal(ownSends.some(s => s.request_id === 'cccccccc-0000-4000-8000-000000000003'), false, 'another owner\'s uncertain row must not appear in this owner\'s list');
   assert.equal(ownSends.some(s => s.last_error_code === 'send_interrupted'), true);
-  assert.equal(Object.keys(ownSends[0]).includes('pipeline_payload'), false, 'the status list must not expose payload contents');
+  assert.deepEqual(Object.keys(ownSends[0]).sort(), ['created_at', 'gmail_message_id', 'id', 'last_error_code', 'request_id', 'status', 'updated_at']);
+  assert.match(ownSends.find(s => s.request_id === valid.request_id).updated_at, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/);
   // Anonymous access is denied before any database work.
   cookieValues = {};
   assert.equal((await send.GET(new NextRequest('https://example.invalid/api/send-email'))).status, 401);
