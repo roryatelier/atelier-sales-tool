@@ -44,6 +44,23 @@ BEGIN
 END;
 `
 
+// Server-owned email drafts (WP3). One row per draft; every save increments the
+// revision so a confirmation can freeze (id, revision) and a later edit can
+// never send stale bytes. The payload is a whitelisted JSON object — it must
+// never carry credentials, tokens, or attachment bytes (slice 2 stores those
+// separately, referenced by attachment_ids).
+export const EMAIL_DRAFTS_SQLITE_DDL = `CREATE TABLE IF NOT EXISTS email_drafts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        owner_google_sub TEXT NOT NULL,
+        owner_email TEXT NOT NULL DEFAULT '',
+        revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
+        payload TEXT NOT NULL,
+        attachment_ids TEXT NOT NULL DEFAULT '[]',
+        created_at TEXT DEFAULT (datetime('now')),
+        updated_at TEXT DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS email_drafts_owner ON email_drafts (owner_google_sub)`
+
 function sqliteSendRecordsReady(sql: string, columns: Set<string>): boolean {
   const normalized = sql.replace(/\s+/g, ' ').toLowerCase()
   const statuses = normalized.match(/check\s*\(\s*status\s+in\s*\(([^)]+)\)\s*\)/)?.[1]
@@ -155,6 +172,13 @@ export async function initialiseDb() {
       next_attempt_at TIMESTAMPTZ, attempt_count INTEGER NOT NULL DEFAULT 0, last_error_code TEXT,
       sheet_range TEXT, accepted_at TIMESTAMPTZ NOT NULL, synced_at TIMESTAMPTZ
     )`
+    await sql`CREATE TABLE IF NOT EXISTS email_drafts (
+      id SERIAL PRIMARY KEY, owner_google_sub TEXT NOT NULL, owner_email TEXT NOT NULL DEFAULT '',
+      revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
+      payload TEXT NOT NULL, attachment_ids TEXT NOT NULL DEFAULT '[]',
+      created_at TIMESTAMP DEFAULT NOW(), updated_at TIMESTAMP DEFAULT NOW()
+    )`
+    await sql`CREATE INDEX IF NOT EXISTS email_drafts_owner ON email_drafts (owner_google_sub)`
     // Install this version once under a transaction-scoped lock. Replacing a
     // function on every request races concurrent initializations in Postgres.
     await sql`DO $migration$ BEGIN
@@ -300,6 +324,7 @@ export async function initialiseDb() {
       // Idempotent scheduling: partial unique index keeps legacy NULL request ids out.
       db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS scheduled_emails_request_id ON scheduled_emails (request_id) WHERE request_id IS NOT NULL`)
       ensureSqliteSendRecords(db)
+      db.exec(EMAIL_DRAFTS_SQLITE_DDL)
       for (const table of ['send_records', 'scheduled_emails']) {
         const columns = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]
         if (!columns.some(column => column.name === 'pipeline_payload')) db.exec(`ALTER TABLE ${table} ADD COLUMN pipeline_payload TEXT`)

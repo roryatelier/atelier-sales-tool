@@ -374,3 +374,23 @@ test('queue alerts report counts and ages only, and never reset or append', asyn
     f.close()
   }
 })
+
+test('email_drafts schema is created idempotently by repeated initialiseDb', async () => {
+  const f = await fixture()
+  try {
+    // The fixture already ran initialiseDb once; run it twice more on the same
+    // temporary SQLite file to prove the drafts DDL is idempotent.
+    await f.load('lib/db.ts').initialiseDb()
+    await f.load('lib/db.ts').initialiseDb()
+    const db = f.db()
+    const tables = db.prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'email_drafts'`).all()
+    assert.equal(tables.length, 1)
+    const columns = db.prepare('PRAGMA table_info(email_drafts)').all().map(column => column.name)
+    for (const required of ['id', 'owner_google_sub', 'owner_email', 'revision', 'payload', 'attachment_ids', 'created_at', 'updated_at']) {
+      assert.ok(columns.includes(required), `email_drafts must have column ${required}`)
+    }
+    const indexes = db.prepare(`SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'email_drafts_owner'`).all()
+    assert.equal(indexes.length, 1)
+    db.close()
+  } finally { f.close() }
+})
