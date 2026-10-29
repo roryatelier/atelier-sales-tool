@@ -3,6 +3,14 @@ import { securityConfigured, verifySession } from '@/lib/auth-policy'
 
 export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl
+  // The health probe is public and read-only: any other method is refused
+  // without a session lookup, so the probe cannot widen into a bypass.
+  if (pathname === '/api/health') {
+    if (request.method !== 'GET' && request.method !== 'HEAD' && request.method !== 'OPTIONS') {
+      return NextResponse.json({ error: 'Method not allowed' }, { status: 405 })
+    }
+    return NextResponse.next()
+  }
   if (pathname === '/api/auth/gmail' || pathname === '/api/auth/callback') return NextResponse.next()
   if (pathname === '/api/cron/send-scheduled-emails') {
     if (!process.env.CRON_SECRET || request.headers.get('authorization') !== 'Bearer ' + process.env.CRON_SECRET) {

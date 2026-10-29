@@ -177,7 +177,9 @@ test('every application API method rejects anonymous requests before provider wo
   const before = providerCalls;
   let handlers = 0;
   function walk(dir) { return fs.readdirSync(dir, { withFileTypes: true }).flatMap(e => e.isDirectory() ? walk(path.join(dir, e.name)) : [path.join(dir, e.name)]); }
-  for (const filename of walk(path.join(root, 'app/api')).filter(f => f.endsWith('route.ts') && !f.includes('/auth/') && !f.includes('/cron/'))) {
+  // /health is the one public application route: its read-only, provider-free
+  // behaviour is asserted by the dedicated health probe test below.
+  for (const filename of walk(path.join(root, 'app/api')).filter(f => f.endsWith('route.ts') && !f.includes('/auth/') && !f.includes('/cron/') && !f.includes('/health/'))) {
     const route = load(path.relative(root, filename));
     for (const method of ['GET', 'POST', 'PUT', 'PATCH', 'DELETE']) if (route[method]) {
       const response = await route[method](new NextRequest('https://example.invalid/api/test', { method }));
@@ -199,6 +201,28 @@ test('proxy protects API paths, exact cron exception and mutation origin', async
   assert.equal((await proxy(bad)).status, 403);
   const good = new NextRequest('https://example.invalid/api/templates', { method: 'POST', headers: { cookie: 'atelier_session=' + token, origin: 'https://example.invalid' } });
   assert.equal((await proxy(good)).headers.get('x-middleware-next'), '1');
+});
+
+test('the health probe is public, read-only, and provider-free', async () => {
+  const { proxy } = load('proxy.ts');
+  const get = new NextRequest('https://example.invalid/api/health');
+  const passed = await proxy(get);
+  assert.equal(passed.headers.get('x-middleware-next'), '1');
+  // A POST must be refused without reaching any session logic.
+  assert.equal((await proxy(new NextRequest('https://example.invalid/api/health', { method: 'POST' }))).status, 405);
+  // A lookalike path stays protected.
+  assert.equal((await proxy(new NextRequest('https://example.invalid/api/health/extra'))).status, 401);
+  // The route itself answers without calling any provider or database.
+  const before = providerCalls;
+  const route = load('app/api/health/route.ts').GET;
+  const response = await route();
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.deepEqual(Object.keys(body).sort(), ['commit', 'env', 'status']);
+  assert.equal(body.status, 'ok');
+  assert.equal(typeof body.commit, 'string');
+  assert.equal(['production', 'preview', 'development', 'local'].includes(body.env), true);
+  assert.equal(providerCalls, before);
 });
 
 test('OAuth state is required before exchange; unverified and non-member emails never obtain a session', async () => {
