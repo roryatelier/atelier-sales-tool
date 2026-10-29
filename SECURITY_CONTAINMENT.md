@@ -23,7 +23,7 @@ Legacy browser drafts have no reliable owner and are cleared. New browser state 
 
 Scheduling is restored for new owner-bound jobs (`delivery_status = 'pending'`), and the worker claims only `pending` rows. Legacy jobs that were never given an owner stay `legacy_quarantined`: they cannot be sent, listed as trustworthy user-owned jobs, or deleted through the legacy scheduling endpoint. Do not auto-activate quarantined rows, and do not return the worker to a blanket rejection or redeploy the previous worker.
 
-Sheets writes inside sending now use a server-only helper. Existing functional limitations, including non-durable sync failure handling and absence of reliable send idempotency, remain for the subsequent repair phases.
+An accepted send records a durable Sheets export (`doc/SHEETS_EXPORTS.md`). Retrying that export does not send the email again. Immediate and scheduled sends keep their own idempotency; an ambiguous Gmail outcome stays in review.
 
 The credential and SQLite files are removed from the tracked tree and excluded from deployment. Ignored local originals may remain for controlled operator recovery. Deleting HEAD does not purge Git history or revoke the exposed key. Preserve required data in restricted storage before any cleanup.
 
