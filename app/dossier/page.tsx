@@ -465,7 +465,7 @@ export default function DossierPage() {
             <line x1="12" y1="9" x2="12" y2="13" strokeWidth="2" strokeLinecap="round"/>
             <line x1="12" y1="17" x2="12.01" y2="17" strokeWidth="2" strokeLinecap="round"/>
           </svg>
-          Limited ANZ data found. Verify before outreach.
+          Limited data found. Verify before outreach.
         </div>
       )}
 
