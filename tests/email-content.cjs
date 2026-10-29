@@ -292,3 +292,14 @@ test('rollback-era guidance edits override an obsolete default marker', async ()
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test('the limited-data banner is region-neutral and only shown for insufficient dossiers', () => {
+  // Source-level assertion (the plan allows this when no dossier UI harness
+  // exists): the copy is region-neutral because data_quality === 'insufficient'
+  // is a generic low-quality flag (lib/research.ts), not an ANZ-specific one.
+  const page = fs.readFileSync(path.join(root, 'app/dossier/page.tsx'), 'utf8')
+  assert.match(page, /Limited data found\. Verify before outreach\./, 'the banner must use the region-neutral copy')
+  assert.equal(/Limited ANZ data/.test(page), false, 'the ANZ-specific wording must be gone')
+  // The banner stays gated on the insufficient flag, so sufficient dossiers hide it.
+  assert.match(page, /dossier\.data_quality === 'insufficient' && \(/, 'the banner must render only when data_quality is insufficient')
+})
