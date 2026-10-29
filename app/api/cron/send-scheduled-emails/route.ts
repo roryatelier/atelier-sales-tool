@@ -13,6 +13,7 @@ import { pipelineSnapshot, preparePipelineExport, syncPipelineSource, processPip
 
 import { claimNext, recoverScheduledEmails, beginScheduledSend, failScheduledSend, acceptScheduledSend, recordAcceptedMessageId, type ScheduledEmail } from '@/lib/scheduled-email-store'
 import { sweepAbandonedSends } from '@/lib/send-sweeper'
+import { reportQueueAlerts } from '@/lib/queue-alerts'
 
 async function recordHistory(email: ScheduledEmail) {
   try {
@@ -37,6 +38,8 @@ export async function GET(request: NextRequest) {
   // Move immediate sends whose outcome was never written to visible review. The
   // sweeper never sends and never returns a row to 'recorded'.
   try { await sweepAbandonedSends() } catch (sweepError) { console.error('Send sweeper unavailable', sweepError) }
+  // Count-only queue alerts: overdue jobs and stuck exports, never mailbox data.
+  try { await reportQueueAlerts() } catch (alertError) { console.error('Queue alert unavailable', alertError) }
   if (!process.env.GMAIL_CLIENT_ID || !process.env.GMAIL_CLIENT_SECRET) return NextResponse.json({ error: 'Gmail configuration unavailable' }, { status: 503 })
   let sent = 0
   let needsReview = recovery.needs_review
