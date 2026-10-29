@@ -229,17 +229,17 @@ Not in the tree today, and not part of the current CI job:
 - A post-deploy check that the health response matches the deployed commit, an anonymous API call is denied, `/` redirects to Google sign-in, and quarantined rows are still not sent.
 - Rollback via the Vercel project, using a token that lives in GitHub Actions and not in an agent environment.
 
-### Doc drift left on purpose
+### Doc drift (fixed in the docs refresh pull request)
 
-| File | What is stale |
+| File | Status |
 |---|---|
-| `doc/TECHNICAL_HANDOFF.md` | Still says Next.js 14 and Node.js 18, and still points operators at a retired coding tool |
-| `doc/PROMPTS.md`, `Prompts/` | Still describe the retired model by name |
-| `doc/HANDOVER.md` | Workflow guide. It publishes the pipeline spreadsheet id |
-| `SECURITY_CONTAINMENT.md` | Scheduler described as paused and returning 503 |
+| `doc/TECHNICAL_HANDOFF.md` | Refreshed: Next.js 16 / Node 20.9+, the retired coding-tool section replaced with the `AGENTS.md` pull-request workflow |
+| `doc/PROMPTS.md`, `Prompts/` | Refreshed: rewritten against the shared OpenAI modules; the retired model is no longer named |
+| `doc/HANDOVER.md` | Workflow guide. It no longer publishes the pipeline spreadsheet id; it points at the `GOOGLE_SHEETS_ID` environment variable. Reviewed against the implementation plan |
+| `SECURITY_CONTAINMENT.md` | Refreshed: the scheduler wording now matches the restored owner-bound scheduling; quarantined rows stay quarantined |
 | `doc/CORRECTIVE_ACTION_PLAN_API_PROVIDER_DRIFT.md` | Execution plan from before the provider migration finished. Keep it as history |
 
-Fix those in a docs pull request. Do not copy private addresses, prospect names, or credential material out of older notes into the repo.
+Fixes landed in the docs refresh pull request, except `doc/CORRECTIVE_ACTION_PLAN_API_PROVIDER_DRIFT.md`, which stays as history. Do not copy private addresses, prospect names, or credential material out of older notes into the repo.
 
 ## Operator checklist (not code)
 

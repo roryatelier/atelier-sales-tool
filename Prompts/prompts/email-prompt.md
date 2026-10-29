@@ -112,7 +112,7 @@ The "body" field must be plain text. No HTML, no markdown. Line breaks between p
 
 ## Trust Gate (server-side, post-generation)
 
-The backend runs this check **after** Claude returns and **before** the email is sent to the frontend.
+The backend runs this check **after** the model returns and **before** the email is sent to the frontend.
 
 A brand-specific fact is defined as: a string that matches a value in `dossier.retailers[]`, `dossier.signals[]`, `dossier.revenue_estimate`, or `dossier.brand_name` appearing in a meaningful context (not just as the salutation).
 
