@@ -12,6 +12,7 @@ import { makeEmailRaw, refreshScheduledGmailToken, sendViaGmail } from '@/lib/gm
 import { pipelineSnapshot, preparePipelineExport, syncPipelineSource, processPipelineExports } from '@/lib/outreach-outbox'
 
 import { claimNext, recoverScheduledEmails, beginScheduledSend, failScheduledSend, acceptScheduledSend, recordAcceptedMessageId, type ScheduledEmail } from '@/lib/scheduled-email-store'
+import { sweepAbandonedSends } from '@/lib/send-sweeper'
 
 async function recordHistory(email: ScheduledEmail) {
   try {
@@ -33,6 +34,9 @@ export async function GET(request: NextRequest) {
   const recovery = await recoverScheduledEmails()
   const deadline = Date.now() + 60_000
   try { await processPipelineExports(1) } catch { console.error('Pipeline export worker unavailable') }
+  // Move immediate sends whose outcome was never written to visible review. The
+  // sweeper never sends and never returns a row to 'recorded'.
+  try { await sweepAbandonedSends() } catch (sweepError) { console.error('Send sweeper unavailable', sweepError) }
   if (!process.env.GMAIL_CLIENT_ID || !process.env.GMAIL_CLIENT_SECRET) return NextResponse.json({ error: 'Gmail configuration unavailable' }, { status: 503 })
   let sent = 0
   let needsReview = recovery.needs_review

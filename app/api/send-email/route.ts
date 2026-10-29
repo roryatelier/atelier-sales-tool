@@ -6,6 +6,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { classifyGmailError, sendViaGmail, type GmailErrorKind } from '@/lib/gmail'
 import { buildHtmlEmailRaw } from '@/lib/email-mime'
 import { logSafeError } from '@/lib/safe-log'
+import { initialiseDb } from '@/lib/db'
 
 // Immediate sends are keyed by a request id the composer mints when the user
 // confirms one specific message. It is treated as opaque; the payload hash is
@@ -143,6 +144,31 @@ async function recordResponse(record: SendRecord, replayed: boolean, owner: stri
 type ClaimFollowUp =
   | { action: 'respond'; response: NextResponse }
   | { action: 'send'; recordId: number }
+
+export async function GET(request: NextRequest) {
+  const auth = await authorizeRequest(request)
+  if (auth.error) return auth.error
+  const session = auth.session
+  // Owner-scoped status list: lets the owner see uncertain or interrupted sends
+  // without the browser tab that started them. No message bodies, no recipients,
+  // no payload contents — identification is by request id and outcome.
+  const { isVercel, getLocalDb } = await import('@/lib/db')
+  await initialiseDb()
+  if (isVercel) {
+    const { sql } = await import('@vercel/postgres')
+    const result = await sql`SELECT id, request_id, status, last_error_code, gmail_message_id, created_at::text AS created_at, updated_at::text AS updated_at
+      FROM send_records WHERE owner_google_sub = ${session.googleSub} AND status IN ('needs_review', 'sending') ORDER BY updated_at DESC LIMIT 20`
+    return NextResponse.json({ sends: result.rows })
+  }
+  const db = getLocalDb()
+  try {
+    const rows = db.prepare(`SELECT id, request_id, status, last_error_code, gmail_message_id, created_at, updated_at
+      FROM send_records WHERE owner_google_sub = ? AND status IN ('needs_review', 'sending') ORDER BY updated_at DESC LIMIT 20`).all(session.googleSub)
+    return NextResponse.json({ sends: rows })
+  } finally {
+    db.close()
+  }
+}
 
 export async function POST(request: NextRequest) {
   const auth = await authorizeRequest(request)
