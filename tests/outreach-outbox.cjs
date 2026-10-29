@@ -322,3 +322,55 @@ test('manual retry recovers expired preparation but only reconciles interrupted 
   assert.equal((await (await retry(uncertain)).json()).status,'synced');assert.equal(f.behavior.appends,1)
  }finally{db.close();f.close()}
 })
+
+test('queue alerts report counts and ages only, and never reset or append', async () => {
+  const f = await fixture(); const db = f.db()
+  const consoleErrors = []
+  const originalError = console.error
+  console.error = (...args) => consoleErrors.push(args)
+  try {
+    // An overdue pending job: scheduled in the past, still pending.
+    db.prepare(`INSERT INTO scheduled_emails(to_email,subject,body,scheduled_at,delivery_status,owner_google_sub,pipeline_payload) VALUES ('recipient@example.invalid','Synthetic','Synthetic',datetime('now','-2 hours'),'pending','owner','{}')`).run()
+    // Exports in each alerting state.
+    db.prepare(`INSERT INTO outreach_exports(source_key,owner_google_sub,payload,gmail_message_id,status,accepted_at) VALUES ('immediate:a','owner','{}','id-a','needs_review',datetime('now'))`).run()
+    db.prepare(`INSERT INTO outreach_exports(source_key,owner_google_sub,payload,gmail_message_id,status,accepted_at,next_attempt_at) VALUES ('immediate:b','owner','{}','id-b','failed',datetime('now'),datetime('now','-1 hour'))`).run()
+    db.prepare(`INSERT INTO outreach_exports(source_key,owner_google_sub,payload,gmail_message_id,status,claimed_at,accepted_at) VALUES ('immediate:c','owner','{}','id-c','claimed',datetime('now','-1 hour'),datetime('now'))`).run()
+    // Healthy rows that must not be counted.
+    db.prepare(`INSERT INTO outreach_exports(source_key,owner_google_sub,payload,gmail_message_id,status,synced_at,accepted_at) VALUES ('immediate:d','owner','{}','id-d','synced',datetime('now'),datetime('now'))`).run()
+    db.prepare(`INSERT INTO scheduled_emails(to_email,subject,body,scheduled_at,delivery_status,owner_google_sub,pipeline_payload) VALUES ('recipient@example.invalid','Synthetic','Synthetic',datetime('now','+2 hours'),'pending','owner','{}')`).run()
+    // Due inside the last 30 minutes, in both stored shapes. A cutoff of "30
+    // minutes ago" would miss these even though a retry is already allowed.
+    db.prepare(`INSERT INTO outreach_exports(source_key,owner_google_sub,payload,gmail_message_id,status,accepted_at,next_attempt_at) VALUES ('immediate:e','owner','{}','id-e','failed',datetime('now'),datetime('now','-10 minutes'))`).run()
+    db.prepare(`INSERT INTO outreach_exports(source_key,owner_google_sub,payload,gmail_message_id,status,accepted_at,next_attempt_at) VALUES ('immediate:f','owner','{}','id-f','failed',datetime('now'),?)`).run(new Date(Date.now() - 10 * 60_000).toISOString())
+    db.prepare(`INSERT INTO outreach_exports(source_key,owner_google_sub,payload,gmail_message_id,status,accepted_at,next_attempt_at) VALUES ('immediate:g','owner','{}','id-g','failed',datetime('now'),datetime('now','+20 minutes'))`).run()
+    db.prepare(`INSERT INTO outreach_exports(source_key,owner_google_sub,payload,gmail_message_id,status,claimed_at,accepted_at) VALUES ('immediate:h','owner','{}','id-h','claimed',datetime('now','-1 minutes'),datetime('now'))`).run()
+    db.prepare(`INSERT INTO outreach_exports(source_key,owner_google_sub,payload,gmail_message_id,status,accepted_at) VALUES ('immediate:i','owner','{}','id-i','claimed',datetime('now'))`).run()
+    const alerts = await f.load('lib/queue-alerts.ts').collectQueueAlerts()
+    assert.equal(alerts.overduePendingJobs, 1)
+    assert.ok(alerts.oldestOverdueJobSeconds >= 7000, 'the oldest overdue job age must be roughly two hours')
+    assert.equal(alerts.exportsNeedsReview, 1)
+    assert.equal(alerts.exportsFailedRetryable, 3)
+    assert.equal(alerts.exportsStaleClaim, 2)
+    // The report logs one safe line with counts only.
+    await f.load('lib/queue-alerts.ts').reportQueueAlerts()
+    assert.equal(consoleErrors.length, 1)
+    const payload = consoleErrors[0][1]
+    assert.deepEqual(Object.keys(payload).sort(), ['exports_failed_retryable', 'exports_needs_review', 'exports_stale_claim', 'oldest_overdue_job_seconds', 'overdue_pending_jobs'])
+    assert.equal(JSON.stringify(consoleErrors).includes('recipient@'), false)
+    assert.equal(JSON.stringify(consoleErrors).includes('id-a'), false)
+    // A quiet queue logs nothing.
+    consoleErrors.length = 0
+    db.prepare(`DELETE FROM scheduled_emails WHERE delivery_status = 'pending'`).run()
+    db.prepare(`DELETE FROM outreach_exports WHERE status != 'synced'`).run()
+    const quiet = await f.load('lib/queue-alerts.ts').collectQueueAlerts()
+    assert.equal(quiet.overduePendingJobs, 0)
+    assert.equal(quiet.exportsNeedsReview, 0)
+    await f.load('lib/queue-alerts.ts').reportQueueAlerts()
+    assert.equal(consoleErrors.length, 0, 'a healthy queue must not alert')
+    // The alert module never mutates queue rows.
+    assert.equal(db.prepare(`SELECT COUNT(*) AS n FROM outreach_exports WHERE status = 'synced'`).get().n, 1)
+  } finally {
+    console.error = originalError
+    f.close()
+  }
+})
