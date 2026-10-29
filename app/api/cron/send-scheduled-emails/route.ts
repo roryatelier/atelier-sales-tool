@@ -12,6 +12,7 @@ import { makeEmailRaw, refreshScheduledGmailToken, sendViaGmail } from '@/lib/gm
 import { pipelineSnapshot, preparePipelineExport, syncPipelineSource, processPipelineExports } from '@/lib/outreach-outbox'
 
 import { claimNext, recoverScheduledEmails, beginScheduledSend, failScheduledSend, acceptScheduledSend, recordAcceptedMessageId, type ScheduledEmail } from '@/lib/scheduled-email-store'
+import { logSafeError } from '@/lib/safe-log'
 import { sweepAbandonedSends } from '@/lib/send-sweeper'
 import { reportQueueAlerts } from '@/lib/queue-alerts'
 
@@ -37,9 +38,11 @@ export async function GET(request: NextRequest) {
   try { await processPipelineExports(1) } catch { console.error('Pipeline export worker unavailable') }
   // Move immediate sends whose outcome was never written to visible review. The
   // sweeper never sends and never returns a row to 'recorded'.
-  try { await sweepAbandonedSends() } catch (sweepError) { console.error('Send sweeper unavailable', sweepError) }
-  // Count-only queue alerts: overdue jobs and stuck exports, never mailbox data.
-  try { await reportQueueAlerts() } catch (alertError) { console.error('Queue alert unavailable', alertError) }
+  try { await sweepAbandonedSends({ initialise: false }) } catch (sweepError) { logSafeError('Send sweeper unavailable', sweepError) }
+  // Count-only queue alerts, after export recovery. recoverPipelineExports has
+  // already moved expired claims to failed or needs_review, so the alert reports
+  // what is still stuck. It never appends and never sends.
+  try { await reportQueueAlerts({ initialise: false }) } catch (alertError) { logSafeError('Queue alert unavailable', alertError) }
   if (!process.env.GMAIL_CLIENT_ID || !process.env.GMAIL_CLIENT_SECRET) return NextResponse.json({ error: 'Gmail configuration unavailable' }, { status: 503 })
   let sent = 0
   let needsReview = recovery.needs_review
