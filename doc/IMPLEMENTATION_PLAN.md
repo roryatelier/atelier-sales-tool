@@ -12,8 +12,8 @@ Agents update this table when a slice merges. Status is `not started`, `in progr
 |---|---|---|---|---|
 | WP0 | In flight, not this plan: second-tab schedule dedupe, constant-time `CRON_SECRET` compare in `proxy.ts` | in flight | — | Not on `71c2c44`. Do not redo. See below. |
 | WP1 | Production acceptance test | not started | — | Blocked on human gates (Sheet access, approved recipient, Vercel cron plan). |
-| WP2 | Monitoring and release checks | not started | — | |
-| WP3 | Durable server-owned drafts | not started | — | |
+| WP2 | Monitoring and release checks | in progress | #20–#22 | Health, sweeper, and queue alerts merged and deployed; post-deploy canary check still open. |
+| WP3 | Durable server-owned drafts | in progress | #26 | Slice 1 (owner-scoped server drafts) in review; slices 2–5 not started. |
 | WP4 | Pipeline ledger migration | not started | — | Cutover waits for WP1. |
 | WP5 | Copper CRM pilot | not started | — | Blocked on WP4 and a field-mapping agreement. |
 | WP6a | Automatic reply detection | not started | — | Human gate: Gmail read scope and re-consent. |
@@ -21,8 +21,8 @@ Agents update this table when a slice merges. Status is `not started`, `in progr
 | WP6c | Email open tracking | not started | — | Human decision. Default is do not build. |
 | WP6d | Bulk pipeline status update | not started | — | Blocked on WP4. |
 | WP6e | Sales Navigator | deferred | — | Human gate: LinkedIn Team account. |
-| WP7a | "Limited ANZ data" banner copy | in progress | #24 | Source-level test added; verify green pending review |
-| WP7b | Stale docs listed in the roadmap | in progress | #25 | provider-policy passed; verify green pending review |
+| WP7a | "Limited ANZ data" banner copy | done | #24 | Merged and deployed; source-level test added. |
+| WP7b | Stale docs listed in the roadmap | done | #25 | Merged and deployed; provider-policy passed. |
 | WP7c | Branch ruleset: required `verify` plus code-owner review | not started | — | Human/admin. A pull request cannot close this. |
 | WP7d | Point `doc/ROADMAP.md` and `AGENTS.md` at this plan | done | — | Landed in the pull request that added this file. |
 
