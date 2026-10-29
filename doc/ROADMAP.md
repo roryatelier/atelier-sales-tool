@@ -1,6 +1,14 @@
 # Roadmap
 
-Backlog for `roryatelier/atelier-sales-tool`, reconciled on 19 October 2026 against `main` at `67456f7` (merge of pull request #7). GitHub Issues are disabled, so this file is the backlog.
+Backlog for `roryatelier/atelier-sales-tool`, reconciled on 19 October 2026 against `main` at `67456f7` (merge of pull request #7). GitHub Issues are disabled. Remaining work is sequenced in [doc/IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md). Agents follow that plan and update its status table. This file is the historical backlog.
+
+## Current plan — 29 October 2026
+
+`main` is `71c2c44` (pull request #19). The sections below were written on 19–20 October 2026. Where they still say a ledger, outbox, immediate-send retry, or scheduled recovery is open, the implementation plan wins.
+
+Landed since the 20 October review: #12 guidance provenance, #13 safe immediate sending, #16 scheduled-send recovery, #17 Sheets export outbox, #18 signature empty state, and #19 scheduling idempotency, Gmail id preservation, the attachment guard, and the dossier XSS fix.
+
+`doc/HANDOVER.md` on this commit does not publish a spreadsheet id. The doc-drift row further down that says it does is stale. Hygiene for that table, the banner copy, and the branch ruleset is work package 7 in the implementation plan.
 
 Status meanings:
 
@@ -9,7 +17,7 @@ Status meanings:
 - **Open** — specified, not implemented. Do not treat an old note outside the repo as proof it shipped.
 - **Operator** — needs a person with admin access to GitHub, Vercel, Google, or a provider account. An agent pull request cannot close it.
 
-`SECURITY_CONTAINMENT.md` describes the containment patch and is stale about the scheduler. `doc/TECHNICAL_HANDOFF.md` and `doc/PROMPTS.md` still describe an older framework version and the retired model. Prefer this file, `AGENTS.md`, and the code.
+`SECURITY_CONTAINMENT.md` describes the containment patch and is stale about the scheduler. `doc/TECHNICAL_HANDOFF.md` and `doc/PROMPTS.md` still describe an older framework version and the retired model. Prefer [doc/IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md), `AGENTS.md`, and the code. The 20 October notes below are historical.
 
 ## Review update — 20 October 2026
 

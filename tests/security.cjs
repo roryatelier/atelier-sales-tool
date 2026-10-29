@@ -177,7 +177,9 @@ test('every application API method rejects anonymous requests before provider wo
   const before = providerCalls;
   let handlers = 0;
   function walk(dir) { return fs.readdirSync(dir, { withFileTypes: true }).flatMap(e => e.isDirectory() ? walk(path.join(dir, e.name)) : [path.join(dir, e.name)]); }
-  for (const filename of walk(path.join(root, 'app/api')).filter(f => f.endsWith('route.ts') && !f.includes('/auth/') && !f.includes('/cron/'))) {
+  // /health is the one public application route: its read-only, provider-free
+  // behaviour is asserted by the dedicated health probe test below.
+  for (const filename of walk(path.join(root, 'app/api')).filter(f => f.endsWith('route.ts') && !f.includes('/auth/') && !f.includes('/cron/') && !f.includes('/health/'))) {
     const route = load(path.relative(root, filename));
     for (const method of ['GET', 'POST', 'PUT', 'PATCH', 'DELETE']) if (route[method]) {
       const response = await route[method](new NextRequest('https://example.invalid/api/test', { method }));
@@ -199,6 +201,52 @@ test('proxy protects API paths, exact cron exception and mutation origin', async
   assert.equal((await proxy(bad)).status, 403);
   const good = new NextRequest('https://example.invalid/api/templates', { method: 'POST', headers: { cookie: 'atelier_session=' + token, origin: 'https://example.invalid' } });
   assert.equal((await proxy(good)).headers.get('x-middleware-next'), '1');
+});
+
+test('the health probe is public, read-only, and provider-free', async () => {
+  const { proxy } = load('proxy.ts');
+  const get = new NextRequest('https://example.invalid/api/health');
+  const passed = await proxy(get);
+  assert.equal(passed.headers.get('x-middleware-next'), '1');
+  // A POST must be refused without reaching any session logic.
+  assert.equal((await proxy(new NextRequest('https://example.invalid/api/health', { method: 'POST' }))).status, 405);
+  // A lookalike path stays protected.
+  assert.equal((await proxy(new NextRequest('https://example.invalid/api/health/extra'))).status, 401);
+  // The route itself answers without calling any provider or database.
+  const before = providerCalls;
+  const route = load('app/api/health/route.ts').GET;
+  const previousCommit = env.VERCEL_GIT_COMMIT_SHA;
+  const previousEnv = env.VERCEL_ENV;
+  try {
+    delete env.VERCEL_GIT_COMMIT_SHA;
+    delete env.VERCEL_ENV;
+    const response = await route();
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('cache-control'), 'no-store');
+    const body = await response.json();
+    assert.deepEqual(Object.keys(body).sort(), ['commit', 'env', 'status']);
+    assert.equal(body.status, 'ok');
+    assert.equal(body.commit, 'unknown');
+    assert.equal(body.env, 'local');
+    env.VERCEL_GIT_COMMIT_SHA = 'abc123def4567890abc123def4567890abc123de';
+    env.VERCEL_ENV = 'preview';
+    const deployed = await (await route()).json();
+    assert.equal(deployed.commit, 'abc123def4567890abc123def4567890abc123de');
+    assert.equal(deployed.env, 'preview');
+    // A mis-set variable must not be echoed. The route is unauthenticated.
+    env.VERCEL_GIT_COMMIT_SHA = 'postgres://secret-host/secret-db';
+    env.VERCEL_ENV = 'Bearer secret-token';
+    const redacted = await (await route()).json();
+    assert.equal(redacted.commit, 'unknown');
+    assert.equal(redacted.env, 'unknown');
+    assert.equal(JSON.stringify(redacted).includes('secret'), false);
+    assert.equal(providerCalls, before);
+  } finally {
+    if (previousCommit === undefined) delete env.VERCEL_GIT_COMMIT_SHA;
+    else env.VERCEL_GIT_COMMIT_SHA = previousCommit;
+    if (previousEnv === undefined) delete env.VERCEL_ENV;
+    else env.VERCEL_ENV = previousEnv;
+  }
 });
 
 test('OAuth state is required before exchange; unverified and non-member emails never obtain a session', async () => {
@@ -1366,3 +1414,77 @@ test('schedule idempotency conflict target matches the partial unique index on b
   const refreshIndex = route.indexOf('await refreshGmailToken(credentials.refreshToken)')
   assert.ok(dedupeIndex !== -1 && refreshIndex !== -1 && dedupeIndex < refreshIndex, 'replay lookup must precede the token refresh')
 })
+
+test('the sweeper moves abandoned sends to review without a second Gmail call', async () => {
+  const Database = require('better-sqlite3');
+  const dbPath = path.join(require('node:os').tmpdir(), `atelier-send-sweeper-${process.pid}.db`);
+  fs.rmSync(dbPath, { force: true });
+  dbMock.initialiseDb = async () => { const db = new Database(dbPath); db.exec(sendRecordsSchema()); db.close(); };
+  dbMock.getLocalDb = () => new Database(dbPath);
+  try {
+  cookieValues = { atelier_session: await policy.signSession(user), atelier_gmail: await policy.sealGmailCredentials({ ...user, accessToken: 'test-access' }) };
+  const send = load('app/api/send-email/route.ts');
+  const sweeper = load('lib/send-sweeper.ts');
+  const valid = { expectedGoogleSub: user.googleSub, request_id: 'cccccccc-0000-4000-8000-000000000001', to: 'contact@example.invalid', subject: 'Hello', emailBody: 'Body', contactName: 'Contact' };
+  const request = body => new NextRequest('https://example.invalid/api/send-email', { method: 'POST', headers: { origin: 'https://example.invalid', 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  const before = providerCalls;
+  assert.equal((await send.POST(request(valid))).status, 200);
+  assert.equal(providerCalls, before + 1);
+  const db = new Database(dbPath);
+  const record = db.prepare('SELECT * FROM send_records WHERE request_id = ?').get(valid.request_id);
+  // A send that was interrupted after the claim but before any outcome write.
+  db.prepare(`UPDATE send_records SET status = 'sending', gmail_message_id = NULL, updated_at = datetime('now', '-10 minutes') WHERE id = ?`).run(record.id);
+  // A second, in-flight row inside the lease must not be swept.
+  db.prepare(`INSERT INTO send_records (request_id, owner_google_sub, owner_email, payload_hash, status, updated_at) VALUES ('cccccccc-0000-4000-8000-000000000002', ?, ?, 'x', 'sending', datetime('now'))`).run(user.googleSub, user.email);
+  assert.equal(await sweeper.sweepAbandonedSends(), 1);
+  const swept = db.prepare('SELECT * FROM send_records WHERE id = ?').get(record.id);
+  assert.equal(swept.status, 'needs_review');
+  assert.equal(swept.last_error_code, 'send_interrupted');
+  assert.equal(swept.gmail_message_id, null);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM outreach_exports').get().n, 0, 'a swept row without a message id must not enqueue an export');
+  const fresh = db.prepare('SELECT status FROM send_records WHERE request_id = ?').get('cccccccc-0000-4000-8000-000000000002');
+  assert.equal(fresh.status, 'sending', 'an in-flight send inside the lease must not be swept');
+  // Replaying the swept request stays uncertain and never calls Gmail again.
+  const replay = await send.POST(request(valid));
+  assert.equal(replay.status, 502);
+  assert.equal((await replay.json()).uncertain, true);
+  assert.equal(providerCalls, before + 1, 'a replay of a swept send must not call Gmail');
+  // A row that already carried a Gmail id keeps it and enqueues exactly one export.
+  db.prepare(`UPDATE send_records SET status = 'sending', gmail_message_id = 'kept-id', pipeline_payload = '{"k":1}', updated_at = datetime('now', '-10 minutes') WHERE id = ?`).run(record.id);
+  assert.equal(await sweeper.sweepAbandonedSends(), 1);
+  const kept = db.prepare('SELECT * FROM send_records WHERE id = ?').get(record.id);
+  assert.equal(kept.gmail_message_id, 'kept-id');
+  assert.equal(kept.status, 'needs_review');
+  assert.equal(kept.last_error, 'Gmail accepted a message, but the outcome was not recorded. Review before sending again.');
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM outreach_exports').get().n, 1, 'the acceptance trigger enqueues exactly one export');
+  assert.equal(await sweeper.sweepAbandonedSends(), 0, 'a second sweep of the same row enqueues nothing more');
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM outreach_exports').get().n, 1);
+  // ISO timestamps must use the same lease. A raw string compare treats 'T' as
+  // later than every sqlite datetime() on that day, so an abandoned ISO row
+  // would stay in 'sending' forever.
+  const isoAbandoned = new Date(Date.now() - 10 * 60_000).toISOString();
+  const isoInFlight = new Date(Date.now() - 60_000).toISOString();
+  db.prepare(`INSERT INTO send_records (request_id, owner_google_sub, owner_email, payload_hash, status, updated_at) VALUES ('cccccccc-0000-4000-8000-000000000004', ?, ?, 'x', 'sending', ?)`).run(user.googleSub, user.email, isoAbandoned);
+  db.prepare(`INSERT INTO send_records (request_id, owner_google_sub, owner_email, payload_hash, status, updated_at) VALUES ('cccccccc-0000-4000-8000-000000000005', ?, ?, 'x', 'sending', ?)`).run(user.googleSub, user.email, isoInFlight);
+  assert.equal(await sweeper.sweepAbandonedSends(), 1);
+  assert.equal(db.prepare('SELECT status FROM send_records WHERE request_id = ?').get('cccccccc-0000-4000-8000-000000000004').status, 'needs_review');
+  assert.equal(db.prepare('SELECT status FROM send_records WHERE request_id = ?').get('cccccccc-0000-4000-8000-000000000005').status, 'sending', 'an in-flight ISO timestamp inside the lease must not be swept');
+  // Owner scoping: a row owned by another account is never returned to this owner.
+  db.prepare(`INSERT INTO send_records (request_id, owner_google_sub, owner_email, payload_hash, status, updated_at) VALUES ('cccccccc-0000-4000-8000-000000000003', 'other-owner-sub', 'other-owner@example.invalid', 'x', 'needs_review', datetime('now'))`).run();
+  const ownResponse = await send.GET(new NextRequest('https://example.invalid/api/send-email'));
+  const ownBody = await ownResponse.json();
+  const ownSends = ownBody.sends;
+  assert.equal(ownBody.owner_google_sub, user.googleSub);
+  assert.equal(ownSends.some(s => s.request_id === 'cccccccc-0000-4000-8000-000000000003'), false, 'another owner\'s uncertain row must not appear in this owner\'s list');
+  assert.equal(ownSends.some(s => s.last_error_code === 'send_interrupted'), true);
+  assert.deepEqual(Object.keys(ownSends[0]).sort(), ['created_at', 'gmail_message_id', 'id', 'last_error_code', 'request_id', 'status', 'updated_at']);
+  assert.match(ownSends.find(s => s.request_id === valid.request_id).updated_at, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/);
+  // Anonymous access is denied before any database work.
+  cookieValues = {};
+  assert.equal((await send.GET(new NextRequest('https://example.invalid/api/send-email'))).status, 401);
+  db.close();
+  } finally {
+    restoreSendMocks();
+    fs.rmSync(dbPath, { force: true });
+  }
+});

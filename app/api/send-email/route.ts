@@ -6,6 +6,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { classifyGmailError, sendViaGmail, type GmailErrorKind } from '@/lib/gmail'
 import { buildHtmlEmailRaw } from '@/lib/email-mime'
 import { logSafeError } from '@/lib/safe-log'
+import { initialiseDb } from '@/lib/db'
 
 // Immediate sends are keyed by a request id the composer mints when the user
 // confirms one specific message. It is treated as opaque; the payload hash is
@@ -143,6 +144,55 @@ async function recordResponse(record: SendRecord, replayed: boolean, owner: stri
 type ClaimFollowUp =
   | { action: 'respond'; response: NextResponse }
   | { action: 'send'; recordId: number }
+
+// Stored timestamps are UTC, but both drivers return them without a zone.
+// A browser would otherwise read that text as local time.
+function utcTimestamp(value: unknown): string | null {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) return value.toISOString()
+  if (typeof value !== 'string') return null
+  const trimmed = value.trim()
+  if (!trimmed) return null
+  const zoned = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(trimmed)
+  const parsed = new Date(zoned ? trimmed : `${trimmed.replace(' ', 'T')}Z`)
+  return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString()
+}
+
+function publicSend(row: Record<string, unknown>) {
+  return {
+    id: row.id,
+    request_id: row.request_id,
+    status: row.status,
+    last_error_code: row.last_error_code ?? null,
+    gmail_message_id: row.gmail_message_id ?? null,
+    created_at: utcTimestamp(row.created_at),
+    updated_at: utcTimestamp(row.updated_at),
+  }
+}
+
+export async function GET(request: NextRequest) {
+  const auth = await authorizeRequest(request)
+  if (auth.error) return auth.error
+  const session = auth.session
+  // Owner-scoped status list: lets the owner see uncertain or interrupted sends
+  // without the browser tab that started them. No message bodies, no recipients,
+  // no payload contents — identification is by request id and outcome.
+  const { isVercel, getLocalDb } = await import('@/lib/db')
+  await initialiseDb()
+  if (isVercel) {
+    const { sql } = await import('@vercel/postgres')
+    const result = await sql`SELECT id, request_id, status, last_error_code, gmail_message_id, created_at::text AS created_at, updated_at::text AS updated_at
+      FROM send_records WHERE owner_google_sub = ${session.googleSub} AND status IN ('needs_review', 'sending') ORDER BY updated_at DESC LIMIT 20`
+    return NextResponse.json({ sends: result.rows.map(row => publicSend(row as Record<string, unknown>)), owner_google_sub: session.googleSub })
+  }
+  const db = getLocalDb()
+  try {
+    const rows = db.prepare(`SELECT id, request_id, status, last_error_code, gmail_message_id, created_at, updated_at
+      FROM send_records WHERE owner_google_sub = ? AND status IN ('needs_review', 'sending') ORDER BY updated_at DESC LIMIT 20`).all(session.googleSub) as Record<string, unknown>[]
+    return NextResponse.json({ sends: rows.map(publicSend), owner_google_sub: session.googleSub })
+  } finally {
+    db.close()
+  }
+}
 
 export async function POST(request: NextRequest) {
   const auth = await authorizeRequest(request)

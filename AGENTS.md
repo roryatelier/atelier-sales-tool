@@ -28,9 +28,9 @@ Critique the change against the invariants below before you call it done. If you
 | Browser account scope | `lib/browser-storage.ts`, `app/components/UserStorageBoundary.tsx` |
 | Release checks | `scripts/check-*.mjs`, `config/deployment.json`, `config/env.schema.json` |
 | Tests | `tests/*.cjs` (`node:test`; Lusha UI uses Playwright) |
-| Backlog | `doc/ROADMAP.md` |
+| Backlog | `doc/IMPLEMENTATION_PLAN.md` (remaining work), `doc/ROADMAP.md` (historical) |
 
-GitHub Issues are disabled. Track unfinished work in `doc/ROADMAP.md`.
+GitHub Issues are disabled. Remaining work is sequenced in `doc/IMPLEMENTATION_PLAN.md`. Update that file's status table when a slice lands. `doc/ROADMAP.md` is the historical backlog and points at the plan.
 
 ## Commands
 
