@@ -10,7 +10,7 @@
 
 ## Overview
 
-The Atelier Sales Intelligence Tool is a full-stack web application built with Next.js 14 and TypeScript, deployed on Vercel. It automates brand research, ICP scoring, contact finding, and personalised email outreach for Atelier's sales team.
+The Atelier Sales Intelligence Tool is a full-stack web application built with Next.js 16 (App Router), React 19 and TypeScript, deployed on Vercel. It automates brand research, ICP scoring, contact finding, and personalised email outreach for Atelier's sales team.
 
 **Live URL:** https://atelier-sales-preview.vercel.app
 **GitHub:** https://github.com/roryatelier/atelier-sales-tool
@@ -36,7 +36,7 @@ The designated Atelier administrator grants access to:
 To run the tool on your own machine:
 
 **Prerequisites:**
-- Install Node.js 18+ from https://nodejs.org
+- Install Node.js 20.9 or newer from https://nodejs.org (CI runs Node 20)
 - Install Git from https://git-scm.com
 - Install VS Code from https://code.visualstudio.com
 
@@ -88,7 +88,7 @@ atelier/
 │   ├── templates/        — Templates
 │   ├── saved/            — Saved Brands
 │   ├── api/              — All backend API routes
-│   │   ├── research/     — Brand research with Claude
+│   │   ├── research/     — Brand research (OpenAI Responses API)
 │   │   ├── email/        — Email generation
 │   │   ├── send-email/   — Gmail send
 │   │   ├── pipeline/     — Google Sheets read
@@ -116,45 +116,25 @@ atelier/
 
 ## Step 4 — How to Make Changes
 
-**For simple changes (labels, colours, text):**
-1. Open the file in VS Code
-2. Make the change
-3. Save with Cmd+S
-4. Run `npm run build` to check for errors
-5. Run `git add . && git commit -m "description" && git push` to deploy
+All changes go through pull requests, per the working agreement in `AGENTS.md`:
 
-**For complex changes (new features, bug fixes):**
-Use Claude Code — an AI assistant that reads and edits your code directly in the terminal:
+1. Branch from up-to-date `main` (`fix/`, `feat/`, `chore/`, `docs/`, `test/` prefixes).
+2. Make the change in VS Code. Behaviour changes need a focused regression test in `tests/`.
+3. Run `npm run verify:ci` locally (typecheck, test suites, provider policy, env schema, build).
+4. Open a pull request describing the problem, change, risk, validation and rollback.
+5. Wait for the required `verify` check and review. Merge is squash. A merge to `main` is what deploys.
 
-```bash
-# Install Claude Code (one time only)
-sudo npm install -g @openai/codex
+Do not push directly to `main`. Never commit secrets, prospect data, or spreadsheet ids — the repo is public.
 
-# Start Claude Code in your project
-cd atelier
-claude
-```
-
-Then type what you want in plain English:
-- "Add a new column to the pipeline table showing the last activity date"
-- "Fix the bug where contacts aren't loading for Aesop"
-- "Change the dashboard greeting font size to 24px"
-
-Claude Code will read the relevant files, make the changes, and verify they work.
+For larger changes, the remaining work is sequenced in `doc/IMPLEMENTATION_PLAN.md` (one slice per pull request).
 
 ---
 
 ## Step 5 — How to Deploy
 
-Every time you push to GitHub, Vercel automatically deploys:
+When a pull request is merged into `main`, Vercel automatically deploys production. Pull-request branches get preview deployments; nothing ships from a branch until it is merged.
 
-```bash
-git add .
-git commit -m "describe what you changed"
-git push
-```
-
-Check the deployment status at https://vercel.com → atelier-sales-preview → Deployments.
+Check the deployment status at https://vercel.com → atelier-sales-preview → Deployments, or the deployment status on the merge commit in GitHub.
 
 Build takes ~2 minutes. If it fails check the build logs in Vercel for the error.
 
@@ -217,7 +197,7 @@ To ensure their Google account works, add their email as a test user in Google C
 
 - **Documentation:** `doc/HANDOVER.md` and `doc/PROMPTS.md` in the GitHub repo
 - **README:** Full setup guide at the root of the repo
-- **Claude Code:** For any code changes — type what you want in plain English
+- **AGENTS.md:** The working agreement for code changes — branching, tests, pull requests, and ask-first paths
 - **This chat:** For questions about the tool's architecture and design decisions
 
 ---

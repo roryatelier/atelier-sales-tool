@@ -108,25 +108,22 @@ An administrator first adds the named user to `APP_ALLOWED_EMAILS` in Preview an
 
 ## Clearing the Dossier Cache
 
-Cached dossiers are stored in Vercel Postgres. To force a brand to be re-researched:
+Cached dossiers are stored in Vercel Postgres (`dossiers` table). To force a brand to be re-researched, connect to the database via the Vercel dashboard → Storage → your database → Query and run:
 
 **Clear a single brand:**
 DELETE FROM dossiers WHERE brand_name_normalised = 'brand name here';
 
-**Clear all cached dossiers:**
-Visit: `https://atelier-sales-preview.vercel.app/api/clear-cache` with a DELETE request, or connect to the Vercel Postgres database directly via the Vercel dashboard → Storage → your database → Query.
+Deleting stored data is an ask-first action (see `AGENTS.md`): confirm with the operator before running it, and never delete rows to make a test pass.
 
 ---
 
 ## Deploying Updates
 
-Any push to the `main` branch on GitHub automatically triggers a Vercel deployment. To deploy:
+Production deploys when a pull request is merged into `main` — Vercel builds automatically. To ship a change:
 
-```bash
-git add .
-git commit -m "description of changes"
-git push
-```
+1. Branch from up-to-date `main`, make the change, add or adjust a focused test.
+2. Run `npm run verify:ci` locally, then open a pull request (problem, change, risk, validation, rollback).
+3. Wait for the required `verify` check and review. Merge is squash. Do not push directly to `main`.
 
 Vercel will build and deploy in ~2 minutes. Check the Vercel dashboard for build status.
 
@@ -147,7 +144,7 @@ Vercel will build and deploy in ~2 minutes. Check the Vercel dashboard for build
 
 ## What's Not Built Yet
 
-These features were scoped out of the MVP but are recommended for v2:
+These features were scoped out of the MVP. They are sequenced with their gates in `doc/IMPLEMENTATION_PLAN.md` (WP6); do not start one without checking its dependencies and human gates:
 
 1. **Automatic reply detection** — connect Gmail read scope to auto-update pipeline when a brand replies
 2. **Email sequence generator** — generate a full 3-email sequence in one click

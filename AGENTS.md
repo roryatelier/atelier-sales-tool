@@ -42,7 +42,7 @@ npm run dev          # http://localhost:3000
 npm run verify:ci    # the check GitHub Actions job `verify` runs
 ```
 
-`verify:ci` is typecheck, seven test suites, provider policy, environment schema, and `next build`. Run it before opening a pull request.
+`verify:ci` is typecheck, eleven test suites (including the Playwright browser suites), provider policy, environment schema, and `next build`. Run it before opening a pull request.
 
 Focused suites:
 
@@ -111,7 +111,7 @@ This repo is public. Do not add customer or prospect names, private email addres
 
 Push and open pull requests only on `roryatelier/atelier-sales-tool`. Never push to `aina-cmyk/atelier`, and do not add that repository as a remote.
 
-`npm run check:provider-policy` fails if application code, tests, `README.md`, `doc/HANDOVER.md`, `doc/TECHNICAL_HANDOFF.md`, or `Prompts/` mention the retired model vendor, a retired Claude model id, or the retired production hostname. Do not reintroduce them.
+`npm run check:provider-policy` fails if application code, tests, `README.md`, `doc/HANDOVER.md`, `doc/TECHNICAL_HANDOOFF.md`, or `Prompts/` mention the retired model vendor, a retired Claude model id, or the retired production hostname. Do not reintroduce them.
 
 ## Definition of done
 

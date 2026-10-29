@@ -156,11 +156,11 @@ Required JSON schema:
 ## Fallback Behaviour (enforced in backend, not prompt)
 
 If `data_quality` is `"insufficient"`:
-- Return the dossier with a warning banner in the frontend: *"Limited ANZ data found. Verify before outreach."*
-- Set `score_band` to `"Watch"` or lower regardless of raw score.
-- VP decides whether to proceed.
+- The dossier page shows a warning banner, and the operator should verify before outreach. The server does not change the score because of this flag.
+- `researchBrand()` caps each score component and sets `score_band` from that total. It does not force `Watch` when data quality is insufficient.
+- The operator decides whether to proceed.
 
-If `JSON.parse()` fails on the Claude response:
+If `JSON.parse()` fails on the model response:
 - Return a structured error to the frontend. Malformed data never passes through.
 
 ---

@@ -8,7 +8,7 @@ Backlog for `roryatelier/atelier-sales-tool`, reconciled on 19 October 2026 agai
 
 Landed since the 20 October review: #12 guidance provenance, #13 safe immediate sending, #16 scheduled-send recovery, #17 Sheets export outbox, #18 signature empty state, and #19 scheduling idempotency, Gmail id preservation, the attachment guard, and the dossier XSS fix.
 
-`doc/HANDOVER.md` on this commit does not publish a spreadsheet id. The doc-drift row further down that says it does is stale. Hygiene for that table, the banner copy, and the branch ruleset is work package 7 in the implementation plan.
+`doc/HANDOVER.md` does not publish a spreadsheet id. The doc-drift table further down records the docs refresh. Banner copy and the branch ruleset remain work package 7 in the implementation plan.
 
 Status meanings:
 
@@ -17,7 +17,7 @@ Status meanings:
 - **Open** — specified, not implemented. Do not treat an old note outside the repo as proof it shipped.
 - **Operator** — needs a person with admin access to GitHub, Vercel, Google, or a provider account. An agent pull request cannot close it.
 
-`SECURITY_CONTAINMENT.md` describes the containment patch and is stale about the scheduler. `doc/TECHNICAL_HANDOFF.md` and `doc/PROMPTS.md` still describe an older framework version and the retired model. Prefer [doc/IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md), `AGENTS.md`, and the code. The 20 October notes below are historical.
+`SECURITY_CONTAINMENT.md`, `doc/TECHNICAL_HANDOFF.md`, and `doc/PROMPTS.md` were refreshed against the current tree. Prefer [doc/IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md), `AGENTS.md`, and the code. The 20 October notes below are historical.
 
 ## Review update — 20 October 2026
 
@@ -231,23 +231,21 @@ Do this after durable send states exist.
 
 ### Release probes
 
-Not in the tree today, and not part of the current CI job:
+- `GET /api/health` is on `main` (#20). It returns status, commit, and environment, and it does not call a provider. It is not part of the CI job.
+- A post-deploy check that the health response matches the deployed commit, that an anonymous API call is denied, that `/` redirects to Google sign-in, and that quarantined rows are still not sent, is not in the repo yet.
+- Rollback via the Vercel project, using a token that lives in GitHub Actions and not in an agent environment, is not in the repo.
 
-- `GET /api/health` returning status, commit, and environment, with no provider calls.
-- A post-deploy check that the health response matches the deployed commit, an anonymous API call is denied, `/` redirects to Google sign-in, and quarantined rows are still not sent.
-- Rollback via the Vercel project, using a token that lives in GitHub Actions and not in an agent environment.
+### Doc drift (fixed in the docs refresh pull request)
 
-### Doc drift left on purpose
-
-| File | What is stale |
+| File | Status |
 |---|---|
-| `doc/TECHNICAL_HANDOFF.md` | Still says Next.js 14 and Node.js 18, and still points operators at a retired coding tool |
-| `doc/PROMPTS.md`, `Prompts/` | Still describe the retired model by name |
-| `doc/HANDOVER.md` | Workflow guide. It publishes the pipeline spreadsheet id |
-| `SECURITY_CONTAINMENT.md` | Scheduler described as paused and returning 503 |
+| `doc/TECHNICAL_HANDOFF.md` | Refreshed: Next.js 16 / Node 20.9+, the retired coding-tool section replaced with the `AGENTS.md` pull-request workflow |
+| `doc/PROMPTS.md`, `Prompts/` | Refreshed: rewritten against the shared OpenAI modules; the retired model is no longer named |
+| `doc/HANDOVER.md` | Workflow guide. It no longer publishes the pipeline spreadsheet id; it points at the `GOOGLE_SHEETS_ID` environment variable. Reviewed against the implementation plan |
+| `SECURITY_CONTAINMENT.md` | Refreshed: the scheduler wording now matches the restored owner-bound scheduling; quarantined rows stay quarantined |
 | `doc/CORRECTIVE_ACTION_PLAN_API_PROVIDER_DRIFT.md` | Execution plan from before the provider migration finished. Keep it as history |
 
-Fix those in a docs pull request. Do not copy private addresses, prospect names, or credential material out of older notes into the repo.
+Fixes landed in the docs refresh pull request, except `doc/CORRECTIVE_ACTION_PLAN_API_PROVIDER_DRIFT.md`, which stays as history. Do not copy private addresses, prospect names, or credential material out of older notes into the repo.
 
 ## Operator checklist (not code)
 

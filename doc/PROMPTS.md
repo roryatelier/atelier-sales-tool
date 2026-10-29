@@ -2,6 +2,8 @@
 
 This file documents the final working prompts used in the Atelier Sales Intelligence Tool. These prompts are the core of the product — changes should be made carefully and tested thoroughly.
 
+All AI calls go through the shared OpenAI modules (`lib/openai.ts`, `lib/openai-email.ts`, `lib/openai-research.ts`) using the Responses API. Model choice and configuration live in those modules, not in the prompts.
+
 ---
 
 ## 1. Brand Research Prompt
@@ -13,9 +15,9 @@ This file documents the final working prompts used in the Atelier Sales Intellig
 **Key design decisions:**
 - Uses web search tool with max 5 uses to find current data
 - Explicitly calls out prestige retailers to look for (Mecca, Sephora, David Jones etc)
-- Scoring rubric is embedded in the prompt to guide Claude's scoring
+- Scoring rubric is embedded in the prompt to guide the model's scoring
 - Requires JSON output only — no preamble or markdown
-- Caps are enforced server-side in `researchBrand()` to prevent Claude over-scoring
+- Caps are enforced server-side in `researchBrand()` to prevent model over-scoring
 - `competitors` field added to support competitor signal detection
 - Celebrity/influencer founder detection added as a signal type
 
@@ -149,9 +151,9 @@ This file documents the final working prompts used in the Atelier Sales Intellig
 ## Prompt Iteration Notes
 
 ### What we learned
-1. **JSON output is fragile** — Claude needs explicit instructions to return JSON only with no preamble. The `jsonMatch` regex extractor is a safety net for when Claude adds markdown fences.
-2. **Trust gate is essential** — without it Claude occasionally generates emails that don't mention the brand at all, especially for obscure brands with limited data.
+1. **JSON output is fragile** — the model needs explicit instructions to return JSON only with no preamble. The `jsonMatch` regex extractor is a safety net for when the model adds markdown fences.
+2. **Trust gate is essential** — without it the model occasionally generates emails that don't mention the brand at all, especially for obscure brands with limited data.
 3. **Role-specific prompts outperform generic ones** — a CMO-specific prompt produces significantly better emails than a generic "decision maker" prompt.
 4. **Signal-first opening matters** — emails that open with a specific buying signal (not "I came across your brand") get much better results.
-5. **Word caps need enforcement** — Claude ignores soft word count suggestions. The 100 word cap is enforced by the prompt structure (3 paragraphs with specific sentence counts per paragraph).
-6. **Score caps must be server-side** — Claude will over-score if not constrained. The `maxScores` cap in `researchBrand()` is essential.
+5. **Word caps need enforcement** — models ignore soft word count suggestions. The 100 word cap is enforced by the prompt structure (3 paragraphs with specific sentence counts per paragraph).
+6. **Score caps must be server-side** — the model will over-score if not constrained. The `maxScores` cap in `researchBrand()` is essential.

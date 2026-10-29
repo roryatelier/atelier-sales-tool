@@ -8,7 +8,7 @@ This branch hardens application access and quarantines the legacy scheduler. It 
 
 - `APP_ALLOWED_EMAILS`: comma-separated exact verified Google email addresses approved by the operator. There is no domain-wide admission. Without this value the application fails closed.
 - `JWT_SECRET`: a newly generated secret with at least 32 bytes. Rotation invalidates previous application sessions and encrypted Gmail cookies. Do not reuse the exposed/chat-supplied password.
-- `CRON_SECRET`: a newly generated service secret. The authenticated cron route deliberately returns 503 while scheduling is paused.
+- `CRON_SECRET`: a newly generated service secret. The cron route requires it and fails closed when it is unset. The containment-era blanket 503 has been removed: scheduling is restored for new owner-bound jobs (see the status note above).
 - Existing Gmail OAuth configuration and approved callback URL remain necessary for named users to reconnect.
 - Vercel requires the production Postgres configuration; missing configuration must not fall back to SQLite.
 - Replace the exposed Google service-account credential through the administrator's secure secret workflow, after revoking the old key in IAM. Never commit credentials.
@@ -21,9 +21,9 @@ All application APIs authenticate before contacting providers. Cookie-authentica
 
 Legacy browser drafts have no reliable owner and are cleared. New browser state is scoped to the current Google subject; other open tabs stop accessing state on account changes. The composer rejects a delayed identity lookup that differs from the identity which unlocked its draft.
 
-Scheduling is paused in the composer and dashboard. Existing jobs remain preserved and quarantined; they cannot be sent, listed as trustworthy user-owned jobs, or deleted through the legacy scheduling endpoint. Resume only after verified ownership migration and a durable send lifecycle; do not redeploy the previous worker.
+Scheduling is restored for new owner-bound jobs (`delivery_status = 'pending'`), and the worker claims only `pending` rows. Legacy jobs that were never given an owner stay `legacy_quarantined`: they cannot be sent, listed as trustworthy user-owned jobs, or deleted through the legacy scheduling endpoint. Do not auto-activate quarantined rows, and do not return the worker to a blanket rejection or redeploy the previous worker.
 
-Sheets writes inside sending now use a server-only helper. Existing functional limitations, including non-durable sync failure handling and absence of reliable send idempotency, remain for the subsequent repair phases.
+An accepted send records a durable Sheets export (`doc/SHEETS_EXPORTS.md`). Retrying that export does not send the email again. Immediate and scheduled sends keep their own idempotency; an ambiguous Gmail outcome stays in review.
 
 The credential and SQLite files are removed from the tracked tree and excluded from deployment. Ignored local originals may remain for controlled operator recovery. Deleting HEAD does not purge Git history or revoke the exposed key. Preserve required data in restricted storage before any cleanup.
 
@@ -33,6 +33,6 @@ Run `npm run test:security`, `npx tsc --noEmit`, `npm run build` and changed-fil
 
 Before production release, obtain the approved named-user list, authoritative revocation evidence, install rotated secrets/replacement credentials, publish the reviewed source and verify the exact deployment identity. Use an isolated preview with test configuration for authorized login validation.
 
-After rollout, anonymous calls to each application API must deny without provider work, old sessions must fail, valid named users must reconnect successfully, cross-origin mutations must fail, and the scheduler must remain visibly paused. A controlled send check requires a designated test recipient and records Gmail acceptance separately from downstream synchronization.
+After rollout, anonymous calls to each application API must deny without provider work, old sessions must fail, valid named users must reconnect successfully, cross-origin mutations must fail, and quarantined legacy jobs must stay unclaimed (the worker selects only `pending` rows). A controlled send check requires a designated test recipient and records Gmail acceptance separately from downstream synchronization.
 
 Rollback must retain these authorization controls, revoked-key replacement and job quarantine. Do not restore exposed credentials or the old scheduler. The current functional backlog is [`doc/ROADMAP.md`](doc/ROADMAP.md).

@@ -306,7 +306,7 @@ Brands are scored out of 100 across 5 criteria:
 ### Known issues
 - **Cached dossiers:** Dossiers already stored in Postgres keep the JSON written at research time. Re-research a brand after scoring or prompt changes rather than assuming old rows gained new fields.
 - **Saved-brands badge:** The sidebar count refreshes when the route changes. An in-page save does not update it until the next navigation.
-- **Scheduled pipeline sync:** A scheduled send can be accepted by Gmail and still fail to append the Sheets row. The job stays `sent`. See [doc/ROADMAP.md](doc/ROADMAP.md).
+- **Scheduled pipeline sync:** historical sends could be accepted by Gmail while the Sheets append failed with no record. Accepted sends now commit with a durable export event that is visible and retryable without resending — see [doc/SHEETS_EXPORTS.md](doc/SHEETS_EXPORTS.md). The remaining ledger migration is tracked in `doc/IMPLEMENTATION_PLAN.md` (WP4).
 - **Gmail OAuth re-auth:** Sessions expire after 30 days — users need to re-authenticate via `/api/auth/gmail`
 - **Industry signals API cost:** Auto-loads on every dashboard open — consider caching results daily to reduce API costs
 
