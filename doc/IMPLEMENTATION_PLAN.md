@@ -21,8 +21,8 @@ Agents update this table when a slice merges. Status is `not started`, `in progr
 | WP6c | Email open tracking | not started | — | Human decision. Default is do not build. |
 | WP6d | Bulk pipeline status update | not started | — | Blocked on WP4. |
 | WP6e | Sales Navigator | deferred | — | Human gate: LinkedIn Team account. |
-| WP7a | "Limited ANZ data" banner copy | not started | — | |
-| WP7b | Stale docs listed in the roadmap | not started | — | |
+| WP7a | "Limited ANZ data" banner copy | in progress | #24 | Source-level test added; verify green pending review |
+| WP7b | Stale docs listed in the roadmap | in progress | #25 | provider-policy passed; verify green pending review |
 | WP7c | Branch ruleset: required `verify` plus code-owner review | not started | — | Human/admin. A pull request cannot close this. |
 | WP7d | Point `doc/ROADMAP.md` and `AGENTS.md` at this plan | done | — | Landed in the pull request that added this file. |
 
