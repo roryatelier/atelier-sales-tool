@@ -215,14 +215,38 @@ test('the health probe is public, read-only, and provider-free', async () => {
   // The route itself answers without calling any provider or database.
   const before = providerCalls;
   const route = load('app/api/health/route.ts').GET;
-  const response = await route();
-  assert.equal(response.status, 200);
-  const body = await response.json();
-  assert.deepEqual(Object.keys(body).sort(), ['commit', 'env', 'status']);
-  assert.equal(body.status, 'ok');
-  assert.equal(typeof body.commit, 'string');
-  assert.equal(['production', 'preview', 'development', 'local'].includes(body.env), true);
-  assert.equal(providerCalls, before);
+  const previousCommit = env.VERCEL_GIT_COMMIT_SHA;
+  const previousEnv = env.VERCEL_ENV;
+  try {
+    delete env.VERCEL_GIT_COMMIT_SHA;
+    delete env.VERCEL_ENV;
+    const response = await route();
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('cache-control'), 'no-store');
+    const body = await response.json();
+    assert.deepEqual(Object.keys(body).sort(), ['commit', 'env', 'status']);
+    assert.equal(body.status, 'ok');
+    assert.equal(body.commit, 'unknown');
+    assert.equal(body.env, 'local');
+    env.VERCEL_GIT_COMMIT_SHA = 'abc123def4567890abc123def4567890abc123de';
+    env.VERCEL_ENV = 'preview';
+    const deployed = await (await route()).json();
+    assert.equal(deployed.commit, 'abc123def4567890abc123def4567890abc123de');
+    assert.equal(deployed.env, 'preview');
+    // A mis-set variable must not be echoed. The route is unauthenticated.
+    env.VERCEL_GIT_COMMIT_SHA = 'postgres://secret-host/secret-db';
+    env.VERCEL_ENV = 'Bearer secret-token';
+    const redacted = await (await route()).json();
+    assert.equal(redacted.commit, 'unknown');
+    assert.equal(redacted.env, 'unknown');
+    assert.equal(JSON.stringify(redacted).includes('secret'), false);
+    assert.equal(providerCalls, before);
+  } finally {
+    if (previousCommit === undefined) delete env.VERCEL_GIT_COMMIT_SHA;
+    else env.VERCEL_GIT_COMMIT_SHA = previousCommit;
+    if (previousEnv === undefined) delete env.VERCEL_ENV;
+    else env.VERCEL_ENV = previousEnv;
+  }
 });
 
 test('OAuth state is required before exchange; unverified and non-member emails never obtain a session', async () => {
