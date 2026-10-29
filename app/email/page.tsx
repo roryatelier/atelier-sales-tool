@@ -12,6 +12,7 @@ import {
 } from '@/lib/email-template-provenance'
 import { confirmedSendDraftContent, compactConfirmedSendKey, createConfirmedSendLedger, shouldRetainRequestId, type RetainedSend } from '@/lib/send-confirmation'
 import { claimStoredSendId, forgetStoredSendId } from '@/lib/send-confirmation-store'
+import { claimScheduleRequestId, forgetScheduleRequestId } from '@/lib/schedule-request-id'
 
 import React, { useEffect, useLayoutEffect, useState, useRef, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
@@ -924,17 +925,9 @@ export default function EmailPage() {
     return (hash >>> 0).toString(36)
   }
 
-  function readStoredScheduleRequest(fingerprint: string): string {
-    try { return sessionStorage.getItem(`atelier_schedule_request_${fingerprint}`) ?? '' } catch { return '' }
-  }
-
-  function storeScheduleRequest(fingerprint: string, requestId: string) {
-    try { sessionStorage.setItem(`atelier_schedule_request_${fingerprint}`, requestId) } catch {}
-  }
-
-  function clearScheduleRequest() {
+  function clearScheduleRequest(owner: string, fingerprint: string) {
     setScheduleRequestId('')
-    try { sessionStorage.removeItem(`atelier_schedule_request_${scheduleFingerprint()}`) } catch {}
+    forgetScheduleRequestId(localStorage, owner, fingerprint)
   }
 
   async function handleSchedule() {
@@ -945,17 +938,15 @@ export default function EmailPage() {
       return
     }
     setScheduling(true)
+    const owner = userGoogleSub
+    const fingerprint = scheduleFingerprint()
     try {
       // One confirmed schedule submission gets one stable identity: the server
-      // replays the recorded job instead of creating a duplicate on retry. The id
-      // survives reloads and second tabs through sessionStorage, keyed by a
-      // fingerprint of the exact draft being scheduled.
-      let requestId = scheduleRequestId
-      if (!requestId) requestId = readStoredScheduleRequest(scheduleFingerprint())
-      if (!requestId) {
-        requestId = crypto.randomUUID()
-        storeScheduleRequest(scheduleFingerprint(), requestId)
-      }
+      // replays the recorded job instead of creating a duplicate on retry. The
+      // id is kept in localStorage for this account and draft fingerprint, so
+      // a reload or a second tab reuses it. Reauth, 5xx, and network errors
+      // keep it. Success, a 4xx rejection, and expiry remove it.
+      const requestId = claimScheduleRequestId(localStorage, owner, fingerprint, scheduleRequestId, () => crypto.randomUUID())
       setScheduleRequestId(requestId)
       const res = await fetch('/api/schedule-email', {
         method: 'POST',
@@ -982,13 +973,13 @@ export default function EmailPage() {
       // server settled the request (success, or a 4xx validation rejection).
       if (data.reauth) { setNeedsAuth(true); setShowScheduleModal(false); return }
       if (!res.ok || !data.success) {
-        if (res.status >= 400 && res.status < 500) clearScheduleRequest()
+        if (res.status >= 400 && res.status < 500) clearScheduleRequest(owner, fingerprint)
         setError(data.error ?? 'Failed to schedule email. Please try again.')
         setShowScheduleModal(false)
         return
       }
       // A replayed confirmation is the same job: show success without re-submitting.
-      clearScheduleRequest()
+      clearScheduleRequest(owner, fingerprint)
       setScheduledTabIds(prev => new Set([...prev, activeTabId]))
       setShowScheduleModal(false)
     } catch {

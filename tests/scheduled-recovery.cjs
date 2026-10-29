@@ -299,3 +299,104 @@ test('acceptance failure after Gmail intent preserves the Gmail message id and q
     assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM outreach_exports').get().n, 1)
   } finally { f.db.close() }
 })
+
+const ID_A = '11111111-1111-4111-8111-111111111111'
+const ID_B = '22222222-2222-4222-8222-222222222222'
+const ID_C = '33333333-3333-4333-8333-333333333333'
+
+function memoryStorage() {
+  const values = new Map()
+  return {
+    get length() { return values.size },
+    key: index => [...values.keys()][index] ?? null,
+    getItem: key => values.has(key) ? values.get(key) : null,
+    setItem: (key, value) => values.set(key, String(value)),
+    removeItem: key => values.delete(key),
+  }
+}
+
+function loadScheduleRequestId() {
+  const exported = {}
+  const filename = path.join(root, 'lib/schedule-request-id.ts')
+  const source = ts.transpileModule(fs.readFileSync(filename, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText
+  vm.runInNewContext(source, { exports: exported }, { filename })
+  return exported
+}
+
+test('schedule request ids are shared across tabs for one draft and expire', () => {
+  const store = loadScheduleRequestId()
+  const owner = 'google-1'
+  const fingerprint = 'draft1'
+  const storage = memoryStorage()
+  const now = 1_700_000_000_000
+  const first = store.claimScheduleRequestId(storage, owner, fingerprint, '', () => ID_A, now)
+  const secondTab = store.claimScheduleRequestId(storage, owner, fingerprint, '', () => ID_B, now)
+  assert.equal(first, ID_A)
+  assert.equal(secondTab, ID_A, 'a second tab with the same draft must reuse the stored id')
+  const reloaded = store.claimScheduleRequestId(memoryStorage(), owner, fingerprint, '', () => ID_B, now)
+  assert.equal(reloaded, ID_B, 'a separate store, as sessionStorage is per tab, must not see the other tab')
+  const kept = store.claimScheduleRequestId(storage, owner, fingerprint, ID_A, () => ID_B, now + 1000)
+  assert.equal(kept, ID_A, 'reauth, 5xx, and network retries keep the in-memory id')
+  const refreshed = JSON.parse(storage.getItem(store.scheduleRequestStorageKey(owner, fingerprint)))
+  assert.equal(refreshed.expiresAt, now + 1000 + store.SCHEDULE_REQUEST_TTL_MS)
+
+  const otherDraft = store.claimScheduleRequestId(storage, owner, 'draft2', '', () => ID_B, now)
+  assert.equal(otherDraft, ID_B)
+  const otherAccount = store.claimScheduleRequestId(storage, 'google-2', fingerprint, '', () => ID_C, now)
+  assert.equal(otherAccount, ID_C)
+  assert.equal(store.claimScheduleRequestId(storage, 'ab', 'c', '', () => ID_A, now), ID_A)
+  assert.equal(store.claimScheduleRequestId(storage, 'a', 'bc', '', () => ID_B, now), ID_B)
+
+  store.forgetScheduleRequestId(storage, owner, fingerprint)
+  assert.equal(storage.getItem(store.scheduleRequestStorageKey(owner, fingerprint)), null)
+  assert.equal(storage.getItem(store.scheduleRequestStorageKey(owner, 'draft2')), JSON.stringify({ requestId: ID_B, expiresAt: now + store.SCHEDULE_REQUEST_TTL_MS }))
+  assert.equal(store.claimScheduleRequestId(storage, owner, fingerprint, '', () => ID_C, now), ID_C, 'success and 4xx clear the id so the next confirmation is new')
+
+  const expiring = memoryStorage()
+  assert.equal(store.claimScheduleRequestId(expiring, owner, fingerprint, '', () => ID_A, now), ID_A)
+  assert.equal(store.claimScheduleRequestId(expiring, owner, fingerprint, '', () => ID_B, now + store.SCHEDULE_REQUEST_TTL_MS - 1), ID_A)
+  const expired = memoryStorage()
+  assert.equal(store.claimScheduleRequestId(expired, owner, fingerprint, '', () => ID_A, now), ID_A)
+  assert.equal(store.claimScheduleRequestId(expired, owner, 'stale', '', () => ID_C, now), ID_C)
+  assert.equal(store.claimScheduleRequestId(expired, owner, fingerprint, '', () => ID_B, now + store.SCHEDULE_REQUEST_TTL_MS), ID_B)
+  assert.equal(expired.getItem(store.scheduleRequestStorageKey(owner, 'stale')), null, 'claiming removes expired ids for other drafts')
+
+  const malformed = memoryStorage()
+  const key = store.scheduleRequestStorageKey(owner, fingerprint)
+  malformed.setItem(key, '{')
+  malformed.setItem('atelier_schedule_request_garbage', 'not-json')
+  assert.equal(store.claimScheduleRequestId(malformed, owner, fingerprint, '', () => ID_A, now), ID_A)
+  assert.equal(malformed.getItem('atelier_schedule_request_garbage'), null)
+  assert.equal(JSON.parse(malformed.getItem(key)).requestId, ID_A)
+
+  const denied = {
+    length: 0,
+    key() { throw new Error('denied') },
+    getItem() { throw new Error('denied') },
+    setItem() { throw new Error('denied') },
+    removeItem() { throw new Error('denied') },
+  }
+  assert.equal(store.claimScheduleRequestId(denied, owner, fingerprint, '', () => ID_A, now), ID_A)
+  assert.equal(store.claimScheduleRequestId(storage, '', fingerprint, '', () => ID_A, now), ID_A)
+  assert.equal(store.claimScheduleRequestId(storage, owner, 'Bad Fingerprint', '', () => ID_B, now), ID_B)
+
+  const occupied = memoryStorage()
+  store.claimScheduleRequestId(occupied, owner, fingerprint, '', () => ID_A, now)
+  assert.equal(store.claimScheduleRequestId(occupied, owner, fingerprint, ID_B, () => ID_C, now), ID_B)
+  assert.equal(store.claimScheduleRequestId(occupied, owner, fingerprint, '', () => ID_C, now), ID_A, 'an in-memory retry must not replace the id another tab stored')
+
+  const page = fs.readFileSync(path.join(root, 'app/email/page.tsx'), 'utf8')
+  const schedule = page.slice(page.indexOf('async function handleSchedule'), page.indexOf('function handleFileSelect'))
+  assert.equal(page.includes('sessionStorage'), false)
+  assert.equal(page.includes('second tabs through sessionStorage'), false)
+  assert.ok(schedule.includes('claimScheduleRequestId(localStorage'))
+  assert.match(schedule, /localStorage for this account and draft fingerprint/)
+  const reauth = schedule.indexOf('if (data.reauth)')
+  const clearOn4xx = schedule.indexOf('res.status >= 400 && res.status < 500) clearScheduleRequest(owner, fingerprint)')
+  const clearOnSuccess = schedule.lastIndexOf('clearScheduleRequest(owner, fingerprint)')
+  assert.ok(reauth > 0 && reauth < clearOn4xx && clearOn4xx < clearOnSuccess)
+  assert.equal(schedule.slice(reauth, schedule.indexOf('return', reauth)).includes('clearScheduleRequest'), false)
+  const caught = schedule.slice(schedule.lastIndexOf('} catch {'))
+  assert.equal(caught.includes('clearScheduleRequest'), false)
+  assert.equal(caught.includes('forgetScheduleRequestId'), false)
+})

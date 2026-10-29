@@ -1,11 +1,5 @@
-import { timingSafeEqual } from 'node:crypto'
 import { NextRequest, NextResponse } from 'next/server'
-
-function cronSecretMatches(presented: string | null, secret: string): boolean {
-  const a = Buffer.from(presented ?? '')
-  const b = Buffer.from(`Bearer ${secret}`)
-  return a.length === b.length && timingSafeEqual(a, b)
-}
+import { cronSecretMatches } from '@/lib/cron-auth'
 import { initialiseDb, isVercel, getLocalDb } from '@/lib/db'
 import { openGmailCredentials, isAuthorizedEmail } from '@/lib/auth-policy'
 import { makeEmailRaw, refreshScheduledGmailToken, sendViaGmail } from '@/lib/gmail'

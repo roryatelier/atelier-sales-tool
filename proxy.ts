@@ -1,11 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { securityConfigured, verifySession } from '@/lib/auth-policy'
+import { cronSecretMatches } from '@/lib/cron-auth'
 
 export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl
   if (pathname === '/api/auth/gmail' || pathname === '/api/auth/callback') return NextResponse.next()
   if (pathname === '/api/cron/send-scheduled-emails') {
-    if (!process.env.CRON_SECRET || request.headers.get('authorization') !== 'Bearer ' + process.env.CRON_SECRET) {
+    const secret = process.env.CRON_SECRET
+    if (!secret || !cronSecretMatches(request.headers.get('authorization'), secret)) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
     }
     return NextResponse.next()

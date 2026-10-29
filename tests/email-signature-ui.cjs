@@ -14,7 +14,7 @@ test('save a signature, generate, regenerate, and preview the same signature on 
   const root = path.resolve(__dirname, '..')
   const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'atelier-signature-ui-'))
   const tracked = execFileSync('git', ['ls-files', '-z'], { cwd: root }).toString().split('\0').filter(Boolean)
-  const extra = ['lib/email-signature.ts', 'lib/email-signature-store.ts', 'app/api/signature/route.ts', 'lib/send-confirmation-store.ts']
+  const extra = ['lib/email-signature.ts', 'lib/email-signature-store.ts', 'app/api/signature/route.ts', 'lib/send-confirmation-store.ts', 'lib/cron-auth.ts', 'lib/schedule-request-id.ts']
   for (const relative of [...new Set([...tracked, ...extra])]) {
     if (relative.startsWith('tests/') || relative.startsWith('.env') || relative === 'atelier.db' || relative.includes('service-account')) continue
     const file = path.join(root, relative)

@@ -201,6 +201,55 @@ test('proxy protects API paths, exact cron exception and mutation origin', async
   assert.equal((await proxy(good)).headers.get('x-middleware-next'), '1');
 });
 
+test('cron secret comparison is constant-time and shared with the proxy', async () => {
+  const helperSource = fs.readFileSync(path.join(root, 'lib/cron-auth.ts'), 'utf8');
+  const proxySource = fs.readFileSync(path.join(root, 'proxy.ts'), 'utf8');
+  const cronSource = fs.readFileSync(path.join(root, 'app/api/cron/send-scheduled-emails/route.ts'), 'utf8');
+  assert.equal(helperSource.includes('node:crypto'), false);
+  assert.equal(helperSource.includes('Buffer'), false);
+  assert.equal(proxySource.includes('node:crypto'), false);
+  assert.equal(cronSource.includes('node:crypto'), false);
+  assert.equal(cronSource.includes('timingSafeEqual'), false);
+  assert.equal(/authorization'\)\s*!==/.test(proxySource), false);
+  assert.ok(proxySource.includes("from '@/lib/cron-auth'"));
+  assert.ok(cronSource.includes("from '@/lib/cron-auth'"));
+  const loop = helperSource.slice(helperSource.indexOf('for ('), helperSource.indexOf('return diff'));
+  assert.ok(loop.includes('diff |='));
+  assert.equal(loop.includes('return'), false);
+
+  const { cronSecretMatches, timingSafeEqualUtf8 } = load('lib/cron-auth.ts');
+  const secret = env.CRON_SECRET;
+  assert.equal(timingSafeEqualUtf8('aaaa', 'aaaa'), true);
+  assert.equal(timingSafeEqualUtf8('aaaa', 'baaa'), false);
+  assert.equal(timingSafeEqualUtf8('aaaa', 'aaab'), false);
+  assert.equal(timingSafeEqualUtf8('aaaa', 'aaa'), false);
+  assert.equal(timingSafeEqualUtf8('', ''), true);
+  assert.equal(cronSecretMatches('Bearer ' + secret, secret), true);
+  assert.equal(cronSecretMatches('Bearer test-crow', secret), false);
+  assert.equal(cronSecretMatches('Bearer ' + secret + 'x', secret), false);
+  assert.equal(cronSecretMatches('bearer ' + secret, secret), false);
+  assert.equal(cronSecretMatches(null, secret), false);
+
+  const { proxy } = load('proxy.ts');
+  const cronUrl = 'https://example.invalid/api/cron/send-scheduled-emails';
+  const cronRequest = authorization => new NextRequest(cronUrl, authorization ? { headers: { authorization } } : {});
+  assert.equal((await proxy(cronRequest('Bearer ' + secret))).headers.get('x-middleware-next'), '1');
+  assert.equal((await proxy(cronRequest('Bearer test-crow'))).status, 401);
+  assert.equal((await proxy(cronRequest('Bearer ' + secret + 'x'))).status, 401);
+  const saved = env.CRON_SECRET;
+  env.CRON_SECRET = '';
+  try {
+    assert.equal((await proxy(cronRequest('Bearer ' + secret))).status, 401);
+  } finally { env.CRON_SECRET = saved; }
+
+  const cron = load('app/api/cron/send-scheduled-emails/route.ts').GET;
+  const before = providerCalls;
+  assert.equal((await cron(cronRequest('Bearer test-crow'))).status, 401);
+  assert.equal(providerCalls, before, 'a rejected cron secret must not touch the database');
+  assert.equal((await cron(cronRequest('Bearer ' + secret))).status, 503);
+  assert.equal(providerCalls, before + 1);
+});
+
 test('OAuth state is required before exchange; unverified and non-member emails never obtain a session', async () => {
   const callback = load('app/api/auth/callback/route.ts').GET;
   const before = providerCalls;
