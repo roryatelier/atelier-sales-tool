@@ -141,6 +141,12 @@ export async function initialiseDb() {
     await sql`ALTER TABLE send_records ADD COLUMN IF NOT EXISTS accepted_at TIMESTAMP`
     await sql`ALTER TABLE send_records ADD COLUMN IF NOT EXISTS pipeline_payload TEXT`
     await sql`ALTER TABLE scheduled_emails ADD COLUMN IF NOT EXISTS pipeline_payload TEXT`
+    await sql`ALTER TABLE scheduled_emails ADD COLUMN IF NOT EXISTS request_id TEXT`
+    await sql`ALTER TABLE scheduled_emails ADD COLUMN IF NOT EXISTS payload_hash TEXT`
+    await sql`ALTER TABLE scheduled_emails ADD COLUMN IF NOT EXISTS gmail_thread_id TEXT`
+    // Idempotent scheduling: a request id binds one schedule submission to one job.
+    // Existing NULL request ids (legacy rows) never collide on a partial index.
+    await sql`CREATE UNIQUE INDEX IF NOT EXISTS scheduled_emails_request_id ON scheduled_emails (request_id) WHERE request_id IS NOT NULL`
     await sql`CREATE TABLE IF NOT EXISTS outreach_exports (
       outreach_id TEXT PRIMARY KEY DEFAULT ('outreach:' || replace(gen_random_uuid()::text,'-','')), source_key TEXT NOT NULL UNIQUE, owner_google_sub TEXT NOT NULL, payload TEXT NOT NULL,
       gmail_message_id TEXT NOT NULL CHECK(length(trim(gmail_message_id)) > 0),
@@ -288,6 +294,11 @@ export async function initialiseDb() {
       try { db.exec(`ALTER TABLE scheduled_emails ADD COLUMN claim_token TEXT`) } catch {}
       try { db.exec(`ALTER TABLE scheduled_emails ADD COLUMN send_intent_at TEXT`) } catch {}
       try { db.exec(`ALTER TABLE scheduled_emails ADD COLUMN next_attempt_at TEXT`) } catch {}
+      try { db.exec(`ALTER TABLE scheduled_emails ADD COLUMN request_id TEXT`) } catch {}
+      try { db.exec(`ALTER TABLE scheduled_emails ADD COLUMN payload_hash TEXT`) } catch {}
+      try { db.exec(`ALTER TABLE scheduled_emails ADD COLUMN gmail_thread_id TEXT`) } catch {}
+      // Idempotent scheduling: partial unique index keeps legacy NULL request ids out.
+      db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS scheduled_emails_request_id ON scheduled_emails (request_id) WHERE request_id IS NOT NULL`)
       ensureSqliteSendRecords(db)
       for (const table of ['send_records', 'scheduled_emails']) {
         const columns = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]

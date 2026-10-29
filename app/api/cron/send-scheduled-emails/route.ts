@@ -1,10 +1,17 @@
+import { timingSafeEqual } from 'node:crypto'
 import { NextRequest, NextResponse } from 'next/server'
+
+function cronSecretMatches(presented: string | null, secret: string): boolean {
+  const a = Buffer.from(presented ?? '')
+  const b = Buffer.from(`Bearer ${secret}`)
+  return a.length === b.length && timingSafeEqual(a, b)
+}
 import { initialiseDb, isVercel, getLocalDb } from '@/lib/db'
 import { openGmailCredentials, isAuthorizedEmail } from '@/lib/auth-policy'
 import { makeEmailRaw, refreshScheduledGmailToken, sendViaGmail } from '@/lib/gmail'
 import { pipelineSnapshot, preparePipelineExport, syncPipelineSource, processPipelineExports } from '@/lib/outreach-outbox'
 
-import { claimNext, recoverScheduledEmails, beginScheduledSend, failScheduledSend, acceptScheduledSend, type ScheduledEmail } from '@/lib/scheduled-email-store'
+import { claimNext, recoverScheduledEmails, beginScheduledSend, failScheduledSend, acceptScheduledSend, recordAcceptedMessageId, type ScheduledEmail } from '@/lib/scheduled-email-store'
 
 async function recordHistory(email: ScheduledEmail) {
   try {
@@ -20,7 +27,7 @@ async function recordHistory(email: ScheduledEmail) {
 
 export async function GET(request: NextRequest) {
   const secret = process.env.CRON_SECRET
-  if (!secret || request.headers.get('authorization') !== `Bearer ${secret}`) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  if (!secret || !cronSecretMatches(request.headers.get('authorization'), secret)) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   try { await initialiseDb() } catch { return NextResponse.json({ error: 'Database unavailable' }, { status: 503 }) }
 
   const recovery = await recoverScheduledEmails()
@@ -47,6 +54,10 @@ export async function GET(request: NextRequest) {
       continue
     }
     let sendStarted = false
+    // Declared at loop level so the outcome handler can see whether Gmail
+    // returned an id for this attempt.
+    let messageId: string | null = null
+    let threadId: string | null = null
     try {
       const raw = makeEmailRaw(email.to_email, email.subject, email.body, email.cc || undefined, email.bcc || undefined)
       if (!isAuthorizedEmail(email.owner_email)) {
@@ -65,19 +76,34 @@ export async function GET(request: NextRequest) {
       }
       if (!await beginScheduledSend(email)) continue
       sendStarted = true
-      const messageId = await sendViaGmail(refresh.accessToken, raw)
-      if (!messageId) throw new Error('missing_message_id')
-      await acceptScheduledSend(email, messageId)
+      try {
+        const sent = await sendViaGmail(refresh.accessToken, raw)
+        messageId = sent.id
+        threadId = sent.threadId
+        if (!messageId) throw new Error('missing_message_id')
+        await acceptScheduledSend(email, messageId, threadId ?? undefined)
+      } catch (acceptanceError) {
+        // Gmail may have accepted this attempt even though acceptance could not be
+        // recorded. Persist the id and queue the export before anything else, so
+        // review never turns into a hand resend and the outbox row is not lost.
+        if (messageId) {
+          try { await recordAcceptedMessageId(email, messageId, threadId ?? undefined) } catch (recordError) { console.error('SCHEDULED SEND ID PRESERVATION FAILED — the Gmail message id could not be recorded; review before any resend.', recordError) }
+        }
+        throw acceptanceError
+      }
       sent++
       await recordHistory(email)
       try { await syncPipelineSource(`scheduled:${email.id}`, email.owner_google_sub) } catch { console.error('Scheduled pipeline export pending') }
-    } catch {
+    } catch (workerError) {
       if (!sendStarted) {
+        console.error('Scheduled send preparation failed', workerError)
         await failScheduledSend(email, 'pending', 'preparation_failed')
         continue
       }
       // A failed Gmail request can be ambiguous. Never retry it automatically.
-      await failScheduledSend(email, 'needs_review', 'gmail_send_ambiguous')
+      // With a Gmail id in hand the more specific preservation code must survive;
+      // only a truly ambiguous outcome takes the generic code.
+      if (messageId) { await failScheduledSend(email, 'needs_review', 'acceptance_write_lost', true) } else { await failScheduledSend(email, 'needs_review', 'gmail_send_ambiguous') }
       needsReview++
     }
   }

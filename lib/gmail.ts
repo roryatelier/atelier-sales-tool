@@ -43,7 +43,9 @@ export async function refreshScheduledGmailToken(refreshToken: string): Promise<
   } catch { return {} }
 }
 
-export async function sendViaGmail(accessToken: string, raw: string): Promise<string> {
+export interface GmailSendResult { id: string; threadId: string | null }
+
+export async function sendViaGmail(accessToken: string, raw: string): Promise<GmailSendResult> {
   const oauth2 = new google.auth.OAuth2(
     process.env.GMAIL_CLIENT_ID,
     process.env.GMAIL_CLIENT_SECRET,
@@ -58,7 +60,10 @@ export async function sendViaGmail(accessToken: string, raw: string): Promise<st
     // treats this as an uncertain outcome that needs review, never a resend.
     throw Object.assign(new Error('Gmail did not return a message id (missing_message_id)'), { code: 'missing_message_id' })
   }
-  return messageId
+  // The thread id is recorded with the message id so follow-ups can land in the
+  // same conversation even when the acceptance write needed recovery.
+  const threadId = typeof result.data.threadId === 'string' && result.data.threadId ? result.data.threadId : null
+  return { id: messageId, threadId }
 }
 
 export function isGmailAuthError(error: unknown): boolean {

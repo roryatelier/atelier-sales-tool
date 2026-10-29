@@ -495,7 +495,7 @@ export async function POST(request: NextRequest) {
     let messageId: string
     try {
       gmailAttempted = true
-      messageId = await sendViaGmail(accessToken, raw)
+      messageId = (await sendViaGmail(accessToken, raw)).id
       acceptedMessageId = messageId
     } catch (sendError) {
       if (classifyGmailError(sendError) === 'auth' && refreshToken) {
@@ -505,7 +505,7 @@ export async function POST(request: NextRequest) {
         if ('error' in refreshed) return respondToRefreshFailure(recordId, refreshed)
         newAccessToken = refreshed.accessToken
         try {
-          messageId = await sendViaGmail(newAccessToken, raw)
+          messageId = (await sendViaGmail(newAccessToken, raw)).id
           acceptedMessageId = messageId
         } catch (retryError) {
           const kind = classifyGmailError(retryError)

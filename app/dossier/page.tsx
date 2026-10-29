@@ -1,6 +1,7 @@
 'use client'
 
 import { userStorage } from '@/lib/browser-storage'
+import { renderDossierBullet } from '@/lib/dossier-bullet'
 
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
@@ -680,7 +681,7 @@ export default function DossierPage() {
                   {bullets.map((bullet, j) => (
                     <li key={j} style={{ display: 'flex', alignItems: 'flex-start', gap: 8, fontSize: 13, color: 'var(--text-default)', lineHeight: 1.4 }}>
                       <span style={{ width: 4, height: 4, borderRadius: '50%', background: 'var(--slate-400)', flexShrink: 0, marginTop: 6 }} />
-                      <span dangerouslySetInnerHTML={{ __html: bullet.trim().replace(/\.$/, '').replace(/\*\*(.+?)\*\*/g, '<strong style="font-weight:600;color:var(--text-default)">$1</strong>') }} />
+                      <span dangerouslySetInnerHTML={{ __html: renderDossierBullet(bullet) }} />
                     </li>
                   ))}
                 </ul>

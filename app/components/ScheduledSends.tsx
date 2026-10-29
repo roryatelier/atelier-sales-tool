@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { activeStorageOwner, matchesDraftIdentity } from '@/lib/browser-storage'
 
-type Job = { id: number; to_email: string; subject: string; brand_name: string; scheduled_at: string; timezone?: string; delivery_status: string; last_error_code?: string }
+type Job = { id: number; to_email: string; subject: string; brand_name: string; scheduled_at: string; timezone?: string; delivery_status: string; last_error_code?: string; gmail_message_id?: string | null }
 export default function ScheduledSends() {
   const [jobs, setJobs] = useState<Job[]>([])
   const [owner, setOwner] = useState('')
@@ -71,7 +71,7 @@ export default function ScheduledSends() {
         {job.delivery_status === 'pending' && <div role="status">{checkedAt - Date.parse(job.scheduled_at) > 30 * 60_000 ? 'Overdue — awaiting the scheduler. Refresh status or cancel.' : job.last_error_code === 'token_refresh_unavailable' ? 'Gmail temporarily unavailable. Safely waiting to retry before sending.' : 'Scheduled'}</div>}
         {job.delivery_status === 'claimed' && <div role="status">Preparing to send. Interrupted preparation can be recovered safely.</div>}
         {job.delivery_status === 'sending' && <div role="status">Send started. If interrupted, it will need review; it will not automatically resend.</div>}
-        {job.delivery_status === 'needs_review' && <div role="alert">Delivery uncertain. Check Gmail Sent before taking further action. This job will not resend automatically.</div>}
+        {job.delivery_status === 'needs_review' && <div role="alert">Delivery uncertain. Check Gmail Sent before taking further action. This job will not resend automatically.{job.gmail_message_id ? ` Gmail message id: ${job.gmail_message_id}.` : ' No Gmail message id was recorded.'}</div>}
         {job.delivery_status === 'needs_reauth' && <div role="alert">Not sent. <a href="/api/auth/gmail">Reconnect Gmail</a>, then confirm resuming this job.</div>}
         {['pending', 'claimed', 'needs_reauth'].includes(job.delivery_status) && <button className="btn btn-ghost btn-sm" disabled={busy !== null} onClick={() => void act(job, false)}>Cancel</button>}
         {job.delivery_status === 'needs_reauth' && (confirmation === job.id ? <div>

@@ -12,7 +12,7 @@
 |------|---------|
 | Live URL | https://atelier-sales-preview.vercel.app |
 | GitHub | https://github.com/roryatelier/atelier-sales-tool |
-| Google Sheets Pipeline | https://docs.google.com/spreadsheets/d/1t2dGrIg9sQYGuqhU38qYcHBRM9XYmk3LFa_k_mA4cd8 |
+| Google Sheets Pipeline | Spreadsheet ID is configured via the `GOOGLE_SHEETS_ID` environment variable |
 | Vercel Project | atelier-sales-preview |
 | Primary user | Samara (VP of Client Partnerships) |
 
