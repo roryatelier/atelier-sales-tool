@@ -1488,3 +1488,83 @@ test('the sweeper moves abandoned sends to review without a second Gmail call', 
     fs.rmSync(dbPath, { force: true });
   }
 });
+
+test('server drafts are owner-scoped, revision-checked, and whitelist-only', async () => {
+  const Database = require('better-sqlite3');
+  const dbPath = path.join(require('node:os').tmpdir(), `atelier-drafts-${process.pid}.db`);
+  fs.rmSync(dbPath, { force: true });
+  const draftsDdl = load('lib/db.ts').EMAIL_DRAFTS_SQLITE_DDL;
+  dbMock.initialiseDb = async () => { const db = new Database(dbPath); db.exec(draftsDdl); db.close(); };
+  dbMock.getLocalDb = () => new Database(dbPath);
+  try {
+  const route = load('app/api/drafts/route.ts');
+  const getRequest = id => new NextRequest('https://example.invalid/api/drafts' + (id ? `?id=${id}` : ''));
+  const postRequest = (body, origin = 'https://example.invalid') => new NextRequest('https://example.invalid/api/drafts', { method: 'POST', headers: { origin, 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  const before = providerCalls;
+
+  // Anonymous access is denied before any database work.
+  cookieValues = {};
+  assert.equal((await route.GET(getRequest())).status, 401);
+  assert.equal((await route.POST(postRequest({ payload: { subject: 'x' } }))).status, 401);
+  assert.equal(providerCalls, before);
+
+  // Authenticated but cross-origin mutation is refused.
+  cookieValues = { atelier_session: await policy.signSession(user) };
+  assert.equal((await route.POST(postRequest({ payload: { subject: 'x' } }, 'https://evil.invalid'))).status, 403);
+
+  // Create.
+  const created = await route.POST(postRequest({ payload: { to: 'contact@example.invalid', subject: 'Hello', body: 'Draft body', instruction: 'Keep it short' } }));
+  assert.equal(created.status, 200);
+  const draft = (await created.json()).draft;
+  assert.equal(draft.revision, 1);
+
+  // Read back the full payload.
+  const read = await route.GET(getRequest(draft.id));
+  assert.equal(read.status, 200);
+  const readDraft = (await read.json()).draft;
+  assert.equal(readDraft.payload.subject, 'Hello');
+  assert.equal(readDraft.payload.instruction, 'Keep it short');
+  assert.deepEqual(JSON.parse(JSON.stringify(readDraft.attachment_ids)), []);
+
+  // Revise with the right expected_revision increments monotonically.
+  const revised = await route.POST(postRequest({ draft_id: draft.id, expected_revision: 1, payload: { to: 'contact@example.invalid', subject: 'Hello v2', body: 'Draft body' } }));
+  assert.equal(revised.status, 200);
+  assert.equal((await revised.json()).draft.revision, 2);
+
+  // A stale revision is a conflict, never a silent overwrite.
+  const stale = await route.POST(postRequest({ draft_id: draft.id, expected_revision: 1, payload: { subject: 'stale' } }));
+  assert.equal(stale.status, 409);
+  assert.equal((await stale.json()).current_revision, 2);
+
+  // Unknown or non-string payload fields are rejected, not stored: the
+  // whitelist is what keeps credentials out of the table.
+  const rejected = await route.POST(postRequest({ payload: { subject: 'x', accessToken: 'secret' } }));
+  assert.equal(rejected.status, 400);
+  const rejected2 = await route.POST(postRequest({ payload: { subject: 42 } }));
+  assert.equal(rejected2.status, 400);
+  const rejected3 = await route.POST(postRequest({ draft_id: draft.id, expected_revision: 2, payload: { subject: 'x' }, attachment_ids: ['a'.repeat(257)] }));
+  assert.equal(rejected3.status, 400);
+
+  // Another owner's draft is indistinguishable from a missing one.
+  const db = new Database(dbPath);
+  db.prepare(`INSERT INTO email_drafts (owner_google_sub, owner_email, revision, payload) VALUES ('other-owner', 'other@example.invalid', 1, '{"subject":"theirs"}')`).run();
+  const otherId = db.prepare(`SELECT id FROM email_drafts WHERE owner_google_sub = 'other-owner'`).get().id;
+  db.close();
+  assert.equal((await route.GET(getRequest(otherId))).status, 404);
+  const reviseOther = await route.POST(postRequest({ draft_id: otherId, expected_revision: 1, payload: { subject: 'hijack' } }));
+  assert.equal(reviseOther.status, 404);
+  assert.equal((await route.GET(getRequest(999999))).status, 404);
+
+  // The list returns only the owner's drafts.
+  const list = await route.GET(getRequest());
+  assert.equal(list.status, 200);
+  const drafts = (await list.json()).drafts;
+  assert.equal(drafts.length, 1);
+  assert.equal(drafts[0].id, draft.id);
+  assert.equal(drafts[0].subject, 'Hello v2');
+  assert.equal(drafts[0].revision, 2);
+  } finally {
+    restoreSendMocks();
+    fs.rmSync(dbPath, { force: true });
+  }
+});
