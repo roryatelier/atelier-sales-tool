@@ -2,8 +2,8 @@ import { initialiseDb, isVercel, getLocalDb } from '@/lib/db'
 
 // Count-only operational signals for the scheduled-send and export queues. The
 // alert never contains recipients, subjects, bodies, message ids, or row
-// contents — counts, ages, and error codes are enough to notice that something
-// is stuck. It observes; it does not append, send, or reset anything.
+// contents — counts and ages are enough to notice that something is stuck. It
+// observes; it does not append, send, or reset anything.
 export const OVERDUE_JOB_MINUTES = 30
 export const EXPORT_LEASE_MINUTES = 5
 
@@ -15,10 +15,19 @@ export interface QueueAlerts {
   exportsStaleClaim: number
 }
 
-export async function collectQueueAlerts(): Promise<QueueAlerts> {
-  await initialiseDb()
-  const overdueCutoff = new Date(Date.now() - OVERDUE_JOB_MINUTES * 60_000).toISOString()
-  const leaseCutoff = new Date(Date.now() - EXPORT_LEASE_MINUTES * 60_000).toISOString()
+function countOf(value: unknown): number {
+  const parsed = Number(value ?? 0)
+  return Number.isFinite(parsed) ? parsed : 0
+}
+
+function ageOf(value: unknown): number | null {
+  if (value === null || value === undefined) return null
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+export async function collectQueueAlerts(options?: { initialise?: boolean }): Promise<QueueAlerts> {
+  if (options?.initialise !== false) await initialiseDb()
   const alerts: QueueAlerts = {
     overduePendingJobs: 0, oldestOverdueJobSeconds: null,
     exportsNeedsReview: 0, exportsFailedRetryable: 0, exportsStaleClaim: 0,
@@ -26,37 +35,50 @@ export async function collectQueueAlerts(): Promise<QueueAlerts> {
   if (isVercel) {
     const { sql } = await import('@vercel/postgres')
     const jobs = await sql`
-      SELECT COUNT(*)::int AS count, FLOOR(EXTRACT(EPOCH FROM (NOW() - MIN(scheduled_at))))::int AS oldest_seconds
+      SELECT COUNT(*)::int AS count,
+        CASE WHEN MIN(scheduled_at) IS NULL THEN NULL
+          ELSE FLOOR(EXTRACT(EPOCH FROM (NOW() - MIN(scheduled_at))))::int END AS oldest_seconds
       FROM scheduled_emails
-      WHERE delivery_status = 'pending' AND scheduled_at < ${overdueCutoff}::timestamptz`
-    alerts.overduePendingJobs = jobs.rows[0]?.count ?? 0
-    alerts.oldestOverdueJobSeconds = jobs.rows[0]?.oldest_seconds ?? null
-    const exports = await sql`
+      WHERE delivery_status = 'pending'
+        AND scheduled_at < NOW() - (${OVERDUE_JOB_MINUTES}::int * interval '1 minute')`
+    alerts.overduePendingJobs = countOf(jobs.rows[0]?.count)
+    alerts.oldestOverdueJobSeconds = ageOf(jobs.rows[0]?.oldest_seconds)
+    const exportCounts = await sql`
       SELECT
         COUNT(*) FILTER (WHERE status = 'needs_review')::int AS needs_review,
         COUNT(*) FILTER (WHERE status = 'failed' AND (next_attempt_at IS NULL OR next_attempt_at <= NOW()))::int AS failed_retryable,
-        COUNT(*) FILTER (WHERE status IN ('claimed', 'writing') AND COALESCE(write_intent_at, claimed_at) < ${leaseCutoff}::timestamptz)::int AS stale_claim
+        COUNT(*) FILTER (WHERE status IN ('claimed', 'writing') AND (
+          COALESCE(write_intent_at, claimed_at) IS NULL
+          OR COALESCE(write_intent_at, claimed_at) < NOW() - (${EXPORT_LEASE_MINUTES}::int * interval '1 minute')
+        ))::int AS stale_claim
       FROM outreach_exports`
-    alerts.exportsNeedsReview = exports.rows[0]?.needs_review ?? 0
-    alerts.exportsFailedRetryable = exports.rows[0]?.failed_retryable ?? 0
-    alerts.exportsStaleClaim = exports.rows[0]?.stale_claim ?? 0
+    alerts.exportsNeedsReview = countOf(exportCounts.rows[0]?.needs_review)
+    alerts.exportsFailedRetryable = countOf(exportCounts.rows[0]?.failed_retryable)
+    alerts.exportsStaleClaim = countOf(exportCounts.rows[0]?.stale_claim)
     return alerts
   }
   const db = getLocalDb()
   try {
-    const jobs = db.prepare(`SELECT COUNT(*) AS count, MIN(scheduled_at) AS oldest
+    // datetime() accepts both ISO text and SQLite's own datetime() text, so a
+    // comparison does not depend on which writer stored the timestamp.
+    const jobs = db.prepare(`SELECT COUNT(*) AS count,
+        CASE WHEN MIN(scheduled_at) IS NULL THEN NULL
+          ELSE CAST(ROUND((julianday('now') - julianday(MIN(scheduled_at))) * 86400) AS INTEGER) END AS oldest_seconds
       FROM scheduled_emails
-      WHERE delivery_status = 'pending' AND scheduled_at < ?`).get(overdueCutoff) as { count: number; oldest: string | null }
-    alerts.overduePendingJobs = jobs.count
-    alerts.oldestOverdueJobSeconds = jobs.oldest ? Math.floor((Date.now() - Date.parse(jobs.oldest + (jobs.oldest.endsWith('Z') ? '' : 'Z'))) / 1000) : null
-    const exports = db.prepare(`SELECT
+      WHERE delivery_status = 'pending' AND datetime(scheduled_at) < datetime('now', ?)`).get(`-${OVERDUE_JOB_MINUTES} minutes`) as { count: number; oldest_seconds: number | null }
+    alerts.overduePendingJobs = countOf(jobs.count)
+    alerts.oldestOverdueJobSeconds = ageOf(jobs.oldest_seconds)
+    const exportCounts = db.prepare(`SELECT
         SUM(CASE WHEN status = 'needs_review' THEN 1 ELSE 0 END) AS needs_review,
-        SUM(CASE WHEN status = 'failed' AND (next_attempt_at IS NULL OR next_attempt_at <= ?) THEN 1 ELSE 0 END) AS failed_retryable,
-        SUM(CASE WHEN status IN ('claimed','writing') AND COALESCE(write_intent_at, claimed_at) < ? THEN 1 ELSE 0 END) AS stale_claim
-      FROM outreach_exports`).get(overdueCutoff, leaseCutoff) as { needs_review: number | null; failed_retryable: number | null; stale_claim: number | null }
-    alerts.exportsNeedsReview = exports.needs_review ?? 0
-    alerts.exportsFailedRetryable = exports.failed_retryable ?? 0
-    alerts.exportsStaleClaim = exports.stale_claim ?? 0
+        SUM(CASE WHEN status = 'failed' AND (next_attempt_at IS NULL OR datetime(next_attempt_at) <= datetime('now')) THEN 1 ELSE 0 END) AS failed_retryable,
+        SUM(CASE WHEN status IN ('claimed','writing') AND (
+          COALESCE(write_intent_at, claimed_at) IS NULL
+          OR datetime(COALESCE(write_intent_at, claimed_at)) < datetime('now', ?)
+        ) THEN 1 ELSE 0 END) AS stale_claim
+      FROM outreach_exports`).get(`-${EXPORT_LEASE_MINUTES} minutes`) as { needs_review: number | null; failed_retryable: number | null; stale_claim: number | null }
+    alerts.exportsNeedsReview = countOf(exportCounts.needs_review)
+    alerts.exportsFailedRetryable = countOf(exportCounts.failed_retryable)
+    alerts.exportsStaleClaim = countOf(exportCounts.stale_claim)
     return alerts
   } finally {
     db.close()
@@ -65,8 +87,8 @@ export async function collectQueueAlerts(): Promise<QueueAlerts> {
 
 // One safe-log line per run when anything is stuck. Expired export claims are
 // recovered elsewhere (recoverPipelineExports); this only reports what remains.
-export async function reportQueueAlerts(): Promise<QueueAlerts> {
-  const alerts = await collectQueueAlerts()
+export async function reportQueueAlerts(options?: { initialise?: boolean }): Promise<QueueAlerts> {
+  const alerts = await collectQueueAlerts(options)
   const stuck = alerts.overduePendingJobs > 0 || alerts.exportsNeedsReview > 0
     || alerts.exportsFailedRetryable > 0 || alerts.exportsStaleClaim > 0
   if (stuck) {
