@@ -12,8 +12,8 @@ Agents update this table when a slice merges. Status is `not started`, `in progr
 |---|---|---|---|---|
 | WP0 | In flight, not this plan: second-tab schedule dedupe, constant-time `CRON_SECRET` compare in `proxy.ts` | in flight | — | Not on `71c2c44`. Do not redo. See below. |
 | WP1 | Production acceptance test | not started | — | Blocked on human gates (Sheet access, approved recipient, Vercel cron plan). |
-| WP2 | Monitoring and release checks | in progress | #20–#22 | Health, sweeper, and queue alerts merged and deployed; post-deploy canary check still open. |
-| WP3 | Durable server-owned drafts | in progress | #26 | Slice 1 (owner-scoped server drafts) in review; slices 2–5 not started. |
+| WP2 | Monitoring and release checks | in progress | #20–#22, post-deploy check in review | Health, sweeper, and queue alerts merged and deployed. Post-deploy check (route and probe script) in review; the workflow file `.github/workflows/post-deploy.yml` and the `PRODUCTION_CRON_SECRET` repository secret are added by Rory, because the agent's token cannot edit workflow files. |
+| WP3 | Durable server-owned drafts | in progress | #26 | Slice 1 (owner-scoped server drafts) merged; slices 2–5 not started. |
 | WP4 | Pipeline ledger migration | not started | — | Cutover waits for WP1. |
 | WP5 | Copper CRM pilot | not started | — | Blocked on WP4 and a field-mapping agreement. |
 | WP6a | Automatic reply detection | not started | — | Human gate: Gmail read scope and re-consent. |

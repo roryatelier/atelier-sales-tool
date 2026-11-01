@@ -203,6 +203,81 @@ test('proxy protects API paths, exact cron exception and mutation origin', async
   assert.equal((await proxy(good)).headers.get('x-middleware-next'), '1');
 });
 
+test('the quarantine status path is exact and needs the cron secret at the proxy', async () => {
+  const { proxy } = load('proxy.ts');
+  const path = 'https://example.invalid/api/cron/quarantine-status';
+  assert.equal((await proxy(new NextRequest(path))).status, 401);
+  assert.equal((await proxy(new NextRequest(path, { headers: { authorization: 'Bearer wrong' } }))).status, 401);
+  assert.equal((await proxy(new NextRequest(path, { headers: { authorization: 'Bearer test-cron' } }))).headers.get('x-middleware-next'), '1');
+  // A lookalike path never gets the cron exception.
+  assert.equal((await proxy(new NextRequest(path + '/extra', { headers: { authorization: 'Bearer test-cron' } }))).status, 401);
+});
+
+test('the post-deploy probe passes on a healthy site and fails on every boundary break', async () => {
+  const http = require('node:http');
+  const { spawn } = require('node:child_process');
+  const state = { commit: 'abc123', pipeline: 401, homeLocation: '/api/auth/gmail', quarantined: 0, statusWithSecret: 200, statusWithoutSecret: 401, secretSeen: '' };
+  const server = http.createServer((req, res) => {
+    const json = (status, body) => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)); };
+    if (req.url === '/api/health') return json(200, { status: 'ok', commit: state.commit, env: 'production' });
+    if (req.url === '/api/pipeline') return json(state.pipeline, {});
+    if (req.url === '/') { res.writeHead(state.homeLocation ? 307 : 200, state.homeLocation ? { location: state.homeLocation } : {}); return res.end(); }
+    if (req.url === '/api/cron/quarantine-status') {
+      if (!req.headers.authorization) return json(state.statusWithoutSecret, {});
+      state.secretSeen = req.headers.authorization;
+      return json(state.statusWithSecret, { status_counts: { pending: 2, legacy_quarantined: 5 }, legacy_quarantined_with_message_id: state.quarantined });
+    }
+    res.writeHead(404); res.end();
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const probe = (overrides = {}) => new Promise(resolve => {
+    const child = spawn(process.execPath, [path.join(root, 'scripts/post-deploy-probe.mjs')], {
+      env: { PATH: process.env.PATH, PROBE_BASE_URL: base, PROBE_EXPECTED_SHA: 'abc123', PROBE_CRON_SECRET: 'probe-secret-value', PROBE_TIMEOUT_SECONDS: '2', PROBE_INTERVAL_SECONDS: '1', ...overrides },
+    });
+    let output = '';
+    child.stdout.on('data', chunk => { output += chunk; });
+    child.stderr.on('data', chunk => { output += chunk; });
+    child.on('close', code => resolve({ code, output }));
+  });
+  try {
+    const healthy = await probe();
+    assert.equal(healthy.code, 0, healthy.output);
+    assert.match(healthy.output, /post-deploy checks passed/);
+    assert.equal(state.secretSeen, 'Bearer probe-secret-value');
+    assert.equal(healthy.output.includes('probe-secret-value'), false, 'the secret must never be printed');
+    assert.equal(/recipient|subject|message id/i.test(healthy.output.replace(/message id\(s\)/g, '')), false);
+
+    state.commit = 'different'; // the deploy has not landed (or the wrong build is live)
+    assert.notEqual((await probe()).code, 0);
+    state.commit = 'abc123';
+
+    state.pipeline = 200; // anonymous API access allowed
+    assert.notEqual((await probe()).code, 0);
+    state.pipeline = 401;
+
+    state.homeLocation = ''; // home page no longer redirects to sign-in
+    assert.notEqual((await probe()).code, 0);
+    state.homeLocation = '/api/auth/gmail';
+
+    state.quarantined = 3; // a quarantined job carries a Gmail id
+    const sent = await probe();
+    assert.notEqual(sent.code, 0);
+    assert.match(sent.output, /legacy-quarantined/);
+    state.quarantined = 0;
+
+    state.statusWithoutSecret = 200; // status route answered without the secret
+    assert.notEqual((await probe()).code, 0);
+    state.statusWithoutSecret = 401;
+
+    const missingSecret = await probe({ PROBE_CRON_SECRET: '' });
+    assert.notEqual(missingSecret.code, 0);
+    assert.match(missingSecret.output, /secret is not set/);
+  } finally {
+    server.close();
+  }
+});
+
 test('the health probe is public, read-only, and provider-free', async () => {
   const { proxy } = load('proxy.ts');
   const get = new NextRequest('https://example.invalid/api/health');
