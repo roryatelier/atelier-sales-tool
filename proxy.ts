@@ -12,7 +12,7 @@ export async function proxy(request: NextRequest) {
     return NextResponse.next()
   }
   if (pathname === '/api/auth/gmail' || pathname === '/api/auth/callback') return NextResponse.next()
-  if (pathname === '/api/cron/send-scheduled-emails') {
+  if (pathname === '/api/cron/send-scheduled-emails' || pathname === '/api/cron/quarantine-status') {
     if (!process.env.CRON_SECRET || request.headers.get('authorization') !== 'Bearer ' + process.env.CRON_SECRET) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
     }

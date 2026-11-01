@@ -300,3 +300,29 @@ test('acceptance failure after Gmail intent preserves the Gmail message id and q
     assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM outreach_exports').get().n, 1)
   } finally { f.db.close() }
 })
+
+test('quarantine status is secret-gated, read-only, count-only, and never sends', async () => {
+  const f = scheduleFixture(); try {
+    const route = f.load('app/api/cron/quarantine-status/route.ts').GET
+    const request = headers => new NextRequest('https://example.invalid/api/cron/quarantine-status', { headers })
+    // A quarantined row that was never sent, and one that wrongly carries a Gmail id.
+    f.db.prepare(`INSERT INTO scheduled_emails (to_email,subject,body,scheduled_at,delivery_status) VALUES ('recipient@example.invalid','S','B',datetime('now'),'legacy_quarantined')`).run()
+    f.db.prepare(`INSERT INTO scheduled_emails (to_email,subject,body,scheduled_at,delivery_status,gmail_message_id) VALUES ('recipient@example.invalid','S','B',datetime('now'),'legacy_quarantined','synthetic-id')`).run()
+    f.seed('pending')
+    const before = JSON.stringify(f.db.prepare('SELECT * FROM scheduled_emails ORDER BY id').all())
+    assert.equal((await route(request({}))).status, 401)
+    assert.equal((await route(request({ authorization: 'Bearer wrong' }))).status, 401)
+    const response = await route(request({ authorization: 'Bearer synthetic' }))
+    assert.equal(response.status, 200)
+    const body = JSON.parse(await response.text())
+    assert.equal(body.legacy_quarantined_with_message_id, 1)
+    assert.equal(body.status_counts.legacy_quarantined, 2)
+    assert.equal(body.status_counts.pending, 1)
+    // Count-only: nothing resembling a recipient, subject, body or id leaks out.
+    const raw = JSON.stringify(body)
+    assert.equal(/recipient@|synthetic-id|"subject"|"body"/.test(raw), false)
+    // Read-only and no mail: the rows are untouched and Gmail was never called.
+    assert.equal(JSON.stringify(f.db.prepare('SELECT * FROM scheduled_emails ORDER BY id').all()), before)
+    assert.equal(f.calls(), 0)
+  } finally { f.db.close() }
+})
